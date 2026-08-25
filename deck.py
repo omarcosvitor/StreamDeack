@@ -19,6 +19,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -45,20 +46,40 @@ foreach ($p in @({PATHS})) {
 ConvertTo-Json -InputObject $out -Compress
 """
 
-# ponytail: SwitchToThisWindow e' undocumentado mas e' o que o Alt+Tab usa e
-# fura o foreground lock. Se um dia quebrar: AttachThreadInput + SetForegroundWindow.
-PS_FOCUS = r"""
+PS_WIN32 = r"""
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
 public class Deck {
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
-  [DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr h, bool alt);
+  [DllImport("user32.dll")] public static extern void keybd_event(byte k, byte s, uint f, UIntPtr e);
 }
 "@
-$h = (Get-Process -Id {PID}).MainWindowHandle
-[Deck]::ShowWindow($h, 9)
-[Deck]::SwitchToThisWindow($h, $true)
+"""
+
+# ponytail: o toque no ALT dribla o foreground lock do Windows. Sem ele o
+# SetForegroundWindow devolve False e a janela abre atras das outras.
+PS_ACTIVATE = r"""
+[Deck]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)
+[Deck]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)
+[Deck]::ShowWindow($h, 9) | Out-Null
+[Deck]::SetForegroundWindow($h) | Out-Null
+"""
+
+PS_FOCUS = PS_WIN32 + "$h = (Get-Process -Id {PID}).MainWindowHandle" + PS_ACTIVATE
+
+PS_LAUNCH = PS_WIN32 + r"""
+$before = @(Get-Process | Where-Object { $_.MainWindowHandle } | ForEach-Object { $_.MainWindowHandle })
+Start-Process -FilePath '{PATH}'
+foreach ($try in 1..20) {
+  Start-Sleep -Milliseconds 250
+  $h = @(Get-Process | Where-Object { $_.MainWindowHandle -and $before -notcontains $_.MainWindowHandle } |
+         ForEach-Object { $_.MainWindowHandle })[0]
+  if ($h) {""" + PS_ACTIVATE + """    break
+  }
+}
 """
 
 _icon_cache = {}
@@ -152,11 +173,23 @@ def apps_payload():
     }
 
 
+def focus(pid):
+    ps(PS_FOCUS.replace("{PID}", str(int(pid))))
+
+
+def launch(path):
+    ps(PS_LAUNCH.replace("{PATH}", path.replace("'", "''")))
+
+
 def run(req):
     if "pid" in req:
-        ps(PS_FOCUS.replace("{PID}", str(int(req["pid"]))))
+        return focus(req["pid"])
+    path = favorites()[int(req["fav"])]["path"]
+    win = next((w for w in list_windows() if (w.get("Path") or "").lower() == path.lower()), None)
+    if win:
+        focus(win["Id"])
     else:
-        os.startfile(favorites()[int(req["fav"])]["path"])
+        launch(path)
 
 
 def edit_favorites(req):
@@ -232,6 +265,32 @@ def selfcheck():
            " if ($i.Width -ne 192 -or $i.Height -ne 192) { throw 'PNG do icone invalido' }" % probe)
     finally:
         os.path.exists(probe) and os.remove(probe)
+
+    fg = PS_WIN32 + "[Deck]::GetForegroundWindow()"
+    arm = PS_WIN32 + "$h = (Get-Process -Id {PID}).MainWindowHandle" + PS_ACTIVATE + r"""
+Start-Sleep -Milliseconds 400
+[Deck]::keybd_event(0x10, 0, 0, [UIntPtr]::Zero)
+[Deck]::keybd_event(0x10, 0, 2, [UIntPtr]::Zero)
+"""
+    other = list_windows()[0]
+    other_h = int(ps("(Get-Process -Id %d).MainWindowHandle" % other["Id"]))
+    invalido = "nao consegui armar a trava de foreground - teste invalido"
+
+    ps(arm.replace("{PID}", str(other["Id"])))
+    assert int(ps(fg)) == other_h, invalido
+    launch("notepad.exe")
+    pid = int(ps("(Get-Process notepad | Sort-Object StartTime | Select-Object -Last 1).Id"))
+    handle = int(ps("(Get-Process -Id %d).MainWindowHandle" % pid))
+    try:
+        time.sleep(0.6)
+        assert int(ps(fg)) == handle, "app recem-lancado ficou atras (trava de foreground)"
+        ps(arm.replace("{PID}", str(other["Id"])))
+        assert int(ps(fg)) == other_h, invalido
+        focus(pid)
+        time.sleep(0.6)
+        assert int(ps(fg)) == handle, "janela existente ficou atras (trava de foreground)"
+    finally:
+        ps("Stop-Process -Id %d -Force" % pid)
 
     print("ok: %d abertos, %d favoritos, %d icones, manifest %d bytes, icon %d bytes"
           % (len(p["running"]), len(p["favorites"]),

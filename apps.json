@@ -1,0 +1,18 @@
+[
+  {
+    "name": "Explorador",
+    "path": "C:\\Windows\\explorer.exe"
+  },
+  {
+    "name": "Bloco de Notas",
+    "path": "C:\\Windows\\System32\\notepad.exe"
+  },
+  {
+    "name": "Calculadora",
+    "path": "C:\\Windows\\System32\\calc.exe"
+  },
+  {
+    "name": "YouTube",
+    "path": "https://www.youtube.com"
+  }
+]

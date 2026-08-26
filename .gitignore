@@ -3,6 +3,10 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+build/
+dist/
+release/
+*.spec
 
 # Segredos / config local
 .env

@@ -1,7 +1,8 @@
 """StreamDeck de bolso.
 
 Uso:
-    python deck.py           inicia o servidor, imprime a URL pra abrir no celular
+    python deck.py           inicia na bandeja do Windows
+    python deck.py serve     inicia no terminal e imprime a URL
     python deck.py check     autoteste
 
 No celular: abre a URL no Chrome, menu -> Compartilhar -> "Adicionar a tela
@@ -23,11 +24,22 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import traceback
+import urllib.request
+import webbrowser
 import zlib
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-FAVS = os.path.join(HERE, "apps.json")
+# O PyInstaller extrai os arquivos empacotados em ``sys._MEIPASS``. A
+# configuracao, por outro lado, precisa ficar fora da pasta do programa para
+# continuar gravavel depois da instalacao e sobreviver a atualizacoes.
+BUNDLE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+if getattr(sys, "frozen", False):
+    DATA_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "StreamDeck")
+else:
+    DATA_DIR = BUNDLE_DIR
+FAVS = os.path.join(DATA_DIR, "apps.json")
 PORT = int(os.environ.get("DECK_PORT", 8765))
 RECENT_MAX = int(os.environ.get("DECK_RECENT_MAX", 24))
 # ponytail: com a sessao bloqueada esse processo segura o foreground e ninguem
@@ -217,6 +229,7 @@ def favorites():
 
 # ponytail: sem lock. Um celular, um clique por vez. Se virar multi-usuario, trave o arquivo.
 def save_favorites(favs):
+    os.makedirs(DATA_DIR, exist_ok=True)
     with open(FAVS, "w", encoding="utf-8") as f:
         json.dump(favs, f, indent=2, ensure_ascii=False)
 
@@ -343,7 +356,7 @@ class Deck(http.server.BaseHTTPRequestHandler):
         if self.path == "/icon.png":
             return self._send(ICON, "image/png")
         if self.path == "/":
-            with open(os.path.join(HERE, "index.html"), "rb") as f:
+            with open(os.path.join(BUNDLE_DIR, "index.html"), "rb") as f:
                 return self._send(f.read(), "text/html; charset=utf-8")
         self.send_error(404)
 
@@ -365,14 +378,165 @@ class Deck(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    # O executavel instalado nao tem console. A implementacao padrao tenta
+    # escrever em sys.stderr e gera uma excecao a cada requisicao nesse modo.
+    def log_message(self, format, *args):
+        if sys.stderr is not None:
+            super().log_message(format, *args)
+
+
+class DeckServer(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def handle_error(self, request, client_address):
+        if sys.stderr is not None:
+            return super().handle_error(request, client_address)
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(os.path.join(DATA_DIR, "error.log"), "a", encoding="utf-8") as log:
+            log.write("\n[%s] Erro atendendo %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), client_address[0]))
+            traceback.print_exc(file=log)
+
 
 def lan_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(("8.8.8.8", 80))
         return s.getsockname()[0]
+    except OSError:
+        try:
+            addresses = socket.gethostbyname_ex(socket.gethostname())[2]
+            return next(ip for ip in addresses if not ip.startswith("127."))
+        except (OSError, StopIteration):
+            return "127.0.0.1"
     finally:
         s.close()
+
+
+def tray_image(size=256):
+    """Icone geometrico legivel tanto na bandeja clara quanto na escura."""
+    from PIL import Image, ImageDraw
+
+    image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    margin = max(1, size // 16)
+    radius = max(2, size // 5)
+    draw.rounded_rectangle(
+        (margin, margin, size - margin - 1, size - margin - 1),
+        radius=radius,
+        fill=(23, 33, 44, 255),
+    )
+    gap = max(1, size // 18)
+    inner = size // 4
+    key = (size - 2 * inner - gap) // 2
+    colors = ((242, 245, 248, 255),) * 3 + ((232, 147, 58, 255),)
+    positions = (
+        (inner, inner),
+        (inner + key + gap, inner),
+        (inner, inner + key + gap),
+        (inner + key + gap, inner + key + gap),
+    )
+    for (left, top), color in zip(positions, colors):
+        draw.rounded_rectangle(
+            (left, top, left + key, top + key),
+            radius=max(1, size // 32),
+            fill=color,
+        )
+    return image
+
+
+def local_url():
+    return "http://127.0.0.1:%d" % PORT
+
+
+def phone_url():
+    return "http://%s:%d" % (lan_ip(), PORT)
+
+
+def deck_is_running():
+    try:
+        with urllib.request.urlopen(local_url() + "/manifest.json", timeout=1) as response:
+            return json.load(response).get("name") == "Deck"
+    except (OSError, ValueError):
+        return False
+
+
+def show_error(message):
+    import ctypes
+    ctypes.windll.user32.MessageBoxW(None, message, "StreamDeck de bolso", 0x10)
+
+
+def run_tray():
+    import pystray
+
+    try:
+        server = DeckServer(("0.0.0.0", PORT), Deck)
+    except OSError as error:
+        if deck_is_running():
+            webbrowser.open(local_url())
+        else:
+            show_error("Nao foi possivel iniciar o StreamDeck.\n\nA porta %d ja esta em uso.\n\n%s"
+                       % (PORT, error))
+        return
+
+    address = phone_url()
+    server_thread = threading.Thread(
+        target=server.serve_forever,
+        name="StreamDeck HTTP",
+        daemon=True,
+    )
+    server_thread.start()
+
+    def open_local(icon, item):
+        webbrowser.open(local_url())
+
+    def copy_address(icon, item):
+        try:
+            ps("Set-Clipboard -Value '%s'" % address.replace("'", "''"))
+            icon.notify("Endereco copiado: %s" % address, "StreamDeck de bolso")
+        except Exception as error:
+            show_error("Nao foi possivel copiar o endereco.\n\n%s" % error)
+
+    def quit_app(icon, item):
+        icon.stop()
+
+    menu = pystray.Menu(
+        pystray.MenuItem("Abrir neste computador", open_local, default=True),
+        pystray.MenuItem("Copiar endereco do celular", copy_address),
+        pystray.MenuItem(address, lambda icon, item: None, enabled=False),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Sair do StreamDeck", quit_app),
+    )
+    icon = pystray.Icon(
+        "StreamDeckDeBolso",
+        tray_image(),
+        "StreamDeck de bolso - %s" % address,
+        menu,
+    )
+
+    def ready(tray_icon):
+        tray_icon.visible = True
+        try:
+            tray_icon.notify(
+                "Rodando em segundo plano.\nNo celular, acesse %s" % address,
+                "StreamDeck de bolso",
+            )
+        except NotImplementedError:
+            pass
+
+    try:
+        icon.run(setup=ready)
+    finally:
+        if server_thread.is_alive():
+            server.shutdown()
+            server_thread.join(timeout=2)
+        server.server_close()
+
+
+def serve_console():
+    address = phone_url()
+    print("Deck em  %s   (libere no firewall do Windows na 1a vez)" % address)
+    DeckServer(("0.0.0.0", PORT), Deck).serve_forever()
 
 
 def selfcheck():
@@ -431,6 +595,7 @@ Start-Sleep -Milliseconds 400
 if __name__ == "__main__":
     if "check" in sys.argv:
         selfcheck()
+    elif "serve" in sys.argv:
+        serve_console()
     else:
-        print("Deck em  http://%s:%d   (libere no firewall do Windows na 1a vez)" % (lan_ip(), PORT))
-        http.server.ThreadingHTTPServer(("0.0.0.0", PORT), Deck).serve_forever()
+        run_tray()

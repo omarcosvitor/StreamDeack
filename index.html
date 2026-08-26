@@ -1,120 +1,297 @@
 <!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
-<meta name="theme-color" content="#111111">
+<meta name="theme-color" content="#0a0c0f">
 <meta name="mobile-web-app-capable" content="yes">
 <link rel="manifest" href="/manifest.json">
 <link rel="icon" href="/icon.png">
 <title>Deck</title>
 <style>
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-  html { overscroll-behavior: none; }
-  body { margin:0; padding:10px 4px 24px; background:#111; color:#eee;
-         font:14px -apple-system,Roboto,Segoe UI,sans-serif;
-         touch-action: manipulation; user-select: none; -webkit-user-select: none; }
-  h2 { font-size:12px; text-transform:uppercase; letter-spacing:.08em;
-       color:#777; margin:16px 0 4px 8px; }
-  #bar { display:flex; align-items:center; padding:0 6px; }
-  #bar b { font-size:15px; letter-spacing:.06em; }
-  #bar button { margin-left:8px; background:#222; color:#999; border:0;
-                border-radius:10px; padding:10px 18px; font-size:16px; }
-  #bar button:first-of-type { margin-left:auto; }
-  #bar button.on { background:#c9762b; color:#111; }
-  .grid { display:flex; flex-wrap:wrap; }
-  .tile { position:relative; width:94px; height:94px; margin:4px; padding:6px;
-          border:0; border-radius:14px; background:#222; color:#eee; font:inherit;
-          overflow:hidden; display:flex; flex-direction:column;
-          align-items:center; justify-content:center; }
-  .tile:active { background:#3c3c3c; }
-  .tile img { width:40px; height:40px; }
-  .tile .ph { width:40px; height:40px; border-radius:10px; background:#33475c;
-              font-size:20px; line-height:40px; text-align:center; }
-  .tile span { margin-top:7px; font-size:11px; width:100%; text-align:center;
-               white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .tile .badge { position:absolute; top:1px; right:6px; font-size:15px; color:#c9762b; }
-  .tile.dim { opacity:.35; }
-</style>
-<div id="bar">
-  <b>DECK</b>
-  <button id="editbtn" onclick="toggleEdit()">&#9998;</button>
-  <button onclick="load()">&#8635;</button>
-</div>
-<h2>Favoritos</h2><div class="grid" id="fav"></div>
-<h2>Abertos no PC</h2><div class="grid" id="run"></div>
-<script>
-var edit = false;
-var data = { favorites: [], running: [] };
+  html, body { height:100%; overscroll-behavior:none; background:#06080a; }
+  body { margin:0; overflow:hidden;
+         color:#e7eaee; font:14px -apple-system,Roboto,Segoe UI,sans-serif;
+         background-image:radial-gradient(130% 95% at 50% -12%, #1a2029 0%, #0c0f13 52%, #06080a 100%);
+         touch-action:manipulation; user-select:none; -webkit-user-select:none; }
 
-function post(url, body, tile) {
-  if (tile) tile.className += ' dim';
-  return fetch(url, { method: 'POST', body: JSON.stringify(body) }).then(function (r) {
-    if (tile) tile.className = tile.className.replace(' dim', '');
-    if (!r.ok) alert(r.statusText);
-    return r.ok;
-  });
+  #stage { position:fixed; left:0; top:0; right:0; bottom:0;
+           overflow-y:scroll; overflow-x:hidden;
+           scroll-snap-type:y mandatory; overscroll-behavior:contain;
+           -webkit-overflow-scrolling:touch; }
+  .row { height:100%; display:flex; overflow-x:scroll; overflow-y:hidden;
+         scroll-snap-type:x mandatory; scroll-snap-align:start; scroll-snap-stop:always;
+         overscroll-behavior-x:contain; -webkit-overflow-scrolling:touch; }
+  .page { flex:none; width:100%; height:100%; padding:5px;
+          scroll-snap-align:start; scroll-snap-stop:always;
+          display:flex; flex-wrap:wrap; align-content:center; justify-content:center; }
+  #stage::-webkit-scrollbar, .row::-webkit-scrollbar { width:0; height:0; }
+
+  .key { flex:none; margin:5px; border-radius:14px; }
+
+  .key { position:relative; border:0; padding:0; overflow:hidden; color:#e7eaee; font:inherit;
+         display:flex; align-items:center; justify-content:center;
+         background-color:#191d24;
+         box-shadow:inset 0 1px 0 rgba(255,255,255,.09),
+                    inset 0 -14px 26px rgba(0,0,0,.34),
+                    inset 0 0 0 1px rgba(255,255,255,.05),
+                    0 3px 9px rgba(0,0,0,.55);
+         transition:transform .1s ease; }
+  .key.press { transform:scale(.935); }
+  .key.busy { opacity:.4; }
+  .key .glow { position:absolute; left:0; top:0; right:0; bottom:0; border-radius:14px;
+               opacity:0; pointer-events:none; transition:opacity .12s ease; }
+  .key.press .glow { opacity:1; }
+  .key img, .key .ph { flex:none; display:block; margin-bottom:15px; }
+  .key .ph { border-radius:11px; background:rgba(255,255,255,.10); color:rgba(255,255,255,.7);
+             font-weight:600; display:flex; align-items:center; justify-content:center; }
+  .key span { position:absolute; left:0; right:0; bottom:8px; padding:0 8px; text-align:center;
+              text-transform:uppercase; letter-spacing:.07em; color:rgba(255,255,255,.6);
+              white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+
+  #dots { position:fixed; left:0; right:0; bottom:5px; display:flex; justify-content:center;
+          opacity:0; pointer-events:none; transition:opacity .35s ease; }
+  #dots.on { opacity:1; }
+  #dots i { width:5px; height:5px; margin:0 4px; border-radius:50%; background:rgba(255,255,255,.2); }
+  #dots i.on { background:#e8933a; }
+
+  #toast { position:fixed; left:50%; bottom:22px; transform:translateX(-50%); max-width:82%;
+           padding:9px 15px; border-radius:13px; font-size:12px; letter-spacing:.02em;
+           background:rgba(30,35,43,.96); color:#e7eaee;
+           box-shadow:0 8px 26px rgba(0,0,0,.6), inset 0 1px 0 rgba(255,255,255,.06);
+           white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+           opacity:0; pointer-events:none; transition:opacity .22s ease; }
+  #toast.on { opacity:1; }
+
+  @media (prefers-reduced-motion: reduce) { .key, .key .glow, #dots, #toast { transition:none; } }
+</style>
+<div id="stage">
+  <section class="row"><div class="page" id="p-open"></div></section>
+  <section class="row" id="row-fav"><div class="page" id="p-fav0"></div><div class="page" id="p-fav1"></div></section>
+  <section class="row"><div class="page" id="p-recent"></div></section>
+</div>
+<div id="dots"><i class="on"></i><i></i></div>
+<div id="toast"></div>
+<script>
+var data = { favorites: [], running: [], recent: [] };
+var grid = { cols: 5, rows: 3, gap: 10, size: 100 };
+var tints = {};
+var stage = document.getElementById('stage');
+var rowFav = document.getElementById('row-fav');
+var P = {
+  open: document.getElementById('p-open'),
+  fav0: document.getElementById('p-fav0'),
+  fav1: document.getElementById('p-fav1'),
+  recent: document.getElementById('p-recent')
+};
+
+function vibe(ms) { if (navigator.vibrate) navigator.vibrate(ms); }
+
+function toast(msg) {
+  var t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'on';
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(function () { t.className = ''; }, 2400);
 }
 
-function tile(label, icon, badge, onTap) {
+function post(url, body, key) {
+  key.className += ' busy';
+  function done() { key.className = key.className.replace(' busy', ''); }
+  return fetch(url, { method: 'POST', body: JSON.stringify(body) }).then(function (r) {
+    done();
+    if (!r.ok) toast(r.statusText || 'o PC recusou');
+    return r.ok;
+  }, function () { done(); toast('sem conexao com o PC'); });
+}
+
+// ponytail: cor dominante = pixel mais saturado de um thumbnail 12x12. Media simples
+// vira cinza; quantizacao de verdade nao vale o codigo pra um icone de 32px.
+function sample(img) {
+  try {
+    var n = 12, cv = document.createElement('canvas');
+    cv.width = cv.height = n;
+    var cx = cv.getContext('2d');
+    cx.drawImage(img, 0, 0, n, n);
+    var d = cx.getImageData(0, 0, n, n).data, best = null, score = 0;
+    for (var i = 0; i < d.length; i += 4) {
+      if (d[i + 3] < 150) continue;
+      var r = d[i], g = d[i + 1], b = d[i + 2];
+      var mx = Math.max(r, g, b), s = (mx - Math.min(r, g, b)) * (0.35 + mx / 400);
+      if (s > score) { score = s; best = [r, g, b]; }
+    }
+    if (best && score > 18) return best;
+  } catch (e) { }
+  return [104, 124, 148];
+}
+
+function paint(key, glow, img) {
+  var c = [104, 124, 148];
+  if (img) {
+    if (!tints[img.src]) tints[img.src] = sample(img);
+    c = tints[img.src];
+  }
+  key.style.backgroundImage = 'linear-gradient(158deg, rgba(' + c + ',.34), rgba(' + c + ',.05) 58%, rgba(0,0,0,.24))';
+  glow.style.boxShadow = 'inset 0 0 0 2px rgba(' + c + ',.9), inset 0 0 22px rgba(' + c + ',.4)';
+}
+
+function press(el, tap, hold) {
+  var timer, dead, sx, sy;
+  function on() { el.className += ' press'; }
+  function off() { el.className = el.className.replace(' press', ''); }
+  el.addEventListener('touchstart', function (e) {
+    dead = false;
+    on();
+    sx = e.touches[0].clientX;
+    sy = e.touches[0].clientY;
+    timer = setTimeout(function () { dead = true; off(); vibe(32); hold(el); }, 520);
+  });
+  el.addEventListener('touchmove', function (e) {
+    var t = e.touches[0];
+    if (Math.abs(t.clientX - sx) > 12 || Math.abs(t.clientY - sy) > 12) {
+      clearTimeout(timer);
+      dead = true;
+      off();
+    }
+  });
+  el.addEventListener('touchend', function (e) {
+    clearTimeout(timer);
+    off();
+    e.preventDefault();
+    if (dead) return;
+    vibe(12);
+    tap(el);
+  });
+  el.onclick = function () { if (!('ontouchstart' in window)) tap(el); };
+}
+
+function buildKey(item, size, tap, hold) {
   var b = document.createElement('button');
-  b.className = 'tile';
-  var art;
-  if (icon) { art = document.createElement('img'); art.src = icon; }
-  else {
+  b.className = 'key';
+  b.style.width = b.style.height = size + 'px';
+  var glow = document.createElement('i');
+  glow.className = 'glow';
+  b.appendChild(glow);
+  var art, as = Math.min(46, Math.round(size * 0.40));
+  if (item.icon) {
+    art = document.createElement('img');
+    art.onload = function () { paint(b, glow, art); };
+    art.src = item.icon;
+  } else {
     art = document.createElement('div');
     art.className = 'ph';
-    art.textContent = (label || '?').charAt(0).toUpperCase();
+    art.textContent = (item.name || '?').charAt(0).toUpperCase();
+    art.style.fontSize = Math.round(as * 0.5) + 'px';
+    paint(b, glow, null);
   }
-  var sp = document.createElement('span');
-  sp.textContent = label;
+  art.style.width = art.style.height = as + 'px';
   b.appendChild(art);
+  var sp = document.createElement('span');
+  sp.textContent = item.name;
+  sp.style.fontSize = Math.max(9, Math.round(size * 0.1)) + 'px';
   b.appendChild(sp);
-  if (badge) {
-    var bd = document.createElement('div');
-    bd.className = 'badge';
-    bd.textContent = badge;
-    b.appendChild(bd);
-  }
-  b.onclick = function () { onTap(b); };
+  press(b, tap, hold);
   return b;
 }
 
-function render() {
-  var fav = document.getElementById('fav');
-  var run = document.getElementById('run');
-  fav.innerHTML = '';
-  run.innerHTML = '';
-
-  data.favorites.forEach(function (a, i) {
-    fav.appendChild(tile(a.name, a.icon, edit ? '✕' : '', function (b) {
-      if (!edit) return post('/api/run', { fav: i }, b);
-      post('/api/fav', { remove: i }, b).then(load);
-    }));
-  });
-
-  data.running.forEach(function (a) {
-    var badge = edit ? (a.fav ? '★' : '☆') : '';
-    run.appendChild(tile(a.name, a.icon, badge, function (b) {
-      if (!edit) return post('/api/run', { pid: a.pid }, b);
-      if (a.fav) return;
-      post('/api/fav', { add: a.pid }, b).then(load);
-    }));
-  });
+function layout() {
+  var pad = 5, gap = 10;
+  var iw = stage.clientWidth - pad * 2, ih = stage.clientHeight - pad * 2;
+  var cols = Math.max(3, Math.min(8, Math.round(iw / 126)));
+  var rows = Math.max(1, Math.floor(ih / (iw / cols)));
+  grid = { cols: cols, rows: rows, gap: gap, pad: pad,
+           size: Math.max(52, Math.min(140, Math.floor(Math.min(iw / cols, ih / rows)) - gap)) };
 }
 
-function toggleEdit() {
-  edit = !edit;
-  document.getElementById('editbtn').className = edit ? 'on' : '';
-  render();
+// ponytail: escolhe a coluna que deixa a tecla maior, nunca maior que a dos favoritos.
+function autoSize(n) {
+  var iw = stage.clientWidth - grid.pad * 2, ih = stage.clientHeight - grid.pad * 2, best = 0;
+  for (var c = 1; c <= n; c++) {
+    var s = Math.min(iw / c, ih / Math.ceil(n / c)) - grid.gap;
+    if (s > best) best = s;
+  }
+  return Math.max(52, Math.min(grid.size, Math.floor(best)));
+}
+
+function favPage(page, from) {
+  page.innerHTML = '';
+  var end = Math.min(data.favorites.length, from + grid.cols * grid.rows);
+  for (var i = from; i < end; i++) page.appendChild(favKey(data.favorites[i], i));
+}
+
+function favKey(a, idx) {
+  return buildKey(a, grid.size,
+    function (b) { post('/api/run', { fav: idx }, b); },
+    function (b) { post('/api/fav', { remove: idx }, b).then(load); });
+}
+
+function openKey(a, size) {
+  return buildKey(a, size,
+    function (b) { post('/api/run', { pid: a.pid }, b); },
+    function (b) {
+      if (a.fav) return toast(a.name + ' ja esta nos favoritos');
+      post('/api/fav', { add: a.pid }, b).then(load);
+    });
+}
+
+function recentKey(a, idx, size) {
+  return buildKey(a, size,
+    function (b) { post('/api/run', { recent: idx }, b); },
+    function (b) { post('/api/fav', { add_recent: idx }, b).then(load); });
+}
+
+function render() {
+  layout();
+  var per = grid.cols * grid.rows;
+  favPage(P.fav0, 0);
+  favPage(P.fav1, per);
+  P.fav1.style.display = data.favorites.length > per ? '' : 'none';
+
+  P.open.innerHTML = '';
+  var size = autoSize(data.running.length || 1);
+  data.running.forEach(function (a) { P.open.appendChild(openKey(a, size)); });
+
+  P.recent.innerHTML = '';
+  size = autoSize(data.recent.length || 1);
+  data.recent.forEach(function (a, i) { P.recent.appendChild(recentKey(a, i, size)); });
+}
+
+function dots() {
+  var d = document.getElementById('dots');
+  if (P.fav1.style.display === 'none') { d.className = ''; return; }
+  var page = rowFav.scrollLeft > rowFav.clientWidth / 2 ? 1 : 0;
+  d.childNodes[0].className = page ? '' : 'on';
+  d.childNodes[1].className = page ? 'on' : '';
+  d.className = Math.abs(stage.scrollTop - stage.clientHeight) < 4 ? 'on' : '';
+  clearTimeout(dots.timer);
+  dots.timer = setTimeout(function () { d.className = ''; }, 1400);
 }
 
 function load() {
   return fetch('/api/apps').then(function (r) { return r.json(); }).then(function (d) {
     data = d;
     render();
-  });
+  }, function () { toast('sem conexao com o PC'); });
 }
 
-load();
+stage.addEventListener('scroll', dots);
+rowFav.addEventListener('scroll', dots);
+// ponytail: a barra de URL do Chrome some e volta durante o scroll e dispara resize.
+// Redesenhar no meio do fling deixa painel cortado - espera parar e recoloca no lugar.
+function reflow() {
+  clearTimeout(reflow.timer);
+  reflow.timer = setTimeout(function () {
+    var v = Math.round(stage.scrollTop / stage.clientHeight);
+    var p = Math.round(rowFav.scrollLeft / rowFav.clientWidth);
+    render();
+    stage.scrollTop = v * stage.clientHeight;
+    rowFav.scrollLeft = p * rowFav.clientWidth;
+  }, 220);
+}
+
+window.addEventListener('resize', reflow);
+window.addEventListener('orientationchange', reflow);
 // ponytail: sem polling, poupa bateria. Recarrega ao voltar pra tela.
 document.addEventListener('visibilitychange', function () { if (!document.hidden) load(); });
+
+load().then(function () { stage.scrollTop = stage.clientHeight; });
 </script>

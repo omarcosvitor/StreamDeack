@@ -4,13 +4,17 @@ Uso:
     python deck.py           inicia o servidor, imprime a URL pra abrir no celular
     python deck.py check     autoteste
 
-No celular: abre a URL no Chrome, menu -> "Adicionar a tela inicial". O atalho
-abre em tela cheia, sem barra de navegador.
+No celular: abre a URL no Chrome, menu -> Compartilhar -> "Adicionar a tela
+inicial". O atalho abre em tela cheia, deitado.
+
+Gestos: desliza pro lado troca a pagina de favoritos, pra cima mostra os apps
+abertos, pra baixo os usados recentemente. Toque abre, toque longo adiciona ou
+remove dos favoritos.
 
 Favoritos ficam em apps.json (name + path). path aceita .exe, .lnk, pasta ou URL.
-Da pra adicionar e remover favoritos pelo proprio celular (botao de editar).
 Porta: variavel de ambiente DECK_PORT (padrao 8765).
 """
+import codecs
 import http.server
 import json
 import os
@@ -25,6 +29,7 @@ import zlib
 HERE = os.path.dirname(os.path.abspath(__file__))
 FAVS = os.path.join(HERE, "apps.json")
 PORT = int(os.environ.get("DECK_PORT", 8765))
+RECENT_MAX = int(os.environ.get("DECK_RECENT_MAX", 24))
 
 PS_LIST = r"""
 $ErrorActionPreference = 'SilentlyContinue'
@@ -82,7 +87,39 @@ foreach ($try in 1..20) {
 }
 """
 
+# ponytail: o UserAssist e a propria lista de "mais usados" do menu Iniciar.
+# Nomes em ROT13, ultimo uso em FILETIME no offset 60. Decodifico no Python.
+PS_RECENT = r"""
+$ErrorActionPreference = 'SilentlyContinue'
+$out = @()
+foreach ($s in Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\UserAssist') {
+  $c = Join-Path $s.PSPath 'Count'
+  if (-not (Test-Path $c)) { continue }
+  $p = Get-ItemProperty $c
+  foreach ($n in $p.PSObject.Properties.Name) {
+    if ($n -like 'PS*') { continue }
+    $d = $p.$n
+    if ($d -isnot [byte[]] -or $d.Length -lt 68) { continue }
+    $out += [pscustomobject]@{ n = $n; t = [BitConverter]::ToInt64($d, 60) }
+  }
+}
+ConvertTo-Json -InputObject @($out) -Compress
+"""
+
+KNOWN_FOLDERS = {
+    "{6D809377-6AF0-444B-8957-A3773F02200E}": os.environ.get("ProgramW6432", ""),
+    "{7C5A40EF-A0FB-4BFC-874A-C0F2E0B9FA8E}": os.environ.get("ProgramFiles(x86)", ""),
+    "{905E63B6-C1BF-494E-B29C-65B732D3D21A}": os.environ.get("ProgramFiles", ""),
+    "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}": os.path.join(os.environ.get("windir", ""), "System32"),
+    "{D65231B0-B2F1-4857-A4CE-A8E7C6EA7D27}": os.path.join(os.environ.get("windir", ""), "System32"),
+    "{F38BF404-1D43-42F2-9305-67DE0B28FC23}": os.environ.get("windir", ""),
+    "{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}": os.path.join(os.environ.get("USERPROFILE", ""), "Desktop"),
+}
+
 _icon_cache = {}
+# ponytail: o celular manda o indice, nunca o caminho - mesma regra dos favoritos.
+# Guardo a ultima lista servida pro indice nao apontar pra outro app.
+_recents = []
 
 
 def png_square(size, rgb):
@@ -97,15 +134,16 @@ def png_square(size, rgb):
             + chunk(b"IEND", b""))
 
 
-ICON = png_square(192, (0x33, 0x47, 0x5C))
+ICON = png_square(192, (0xE8, 0x93, 0x3A))
 
 MANIFEST = json.dumps({
     "name": "Deck",
     "short_name": "Deck",
     "start_url": "/",
     "display": "fullscreen",
-    "background_color": "#111111",
-    "theme_color": "#111111",
+    "orientation": "landscape",
+    "background_color": "#0b0d10",
+    "theme_color": "#0b0d10",
     "icons": [{"src": "/icon.png", "sizes": "192x192", "type": "image/png"}],
 }).encode()
 
@@ -154,9 +192,37 @@ def icons_for(paths):
     return {p: "data:image/png;base64," + _icon_cache[p] for p in paths if _icon_cache.get(p)}
 
 
+def recents():
+    out = ps(PS_RECENT)
+    rows = json.loads(out) if out else []
+    if isinstance(rows, dict):
+        rows = [rows]
+    seen = {a.get("path", "").lower() for a in favorites()}
+    apps = []
+    for row in sorted(rows or [], key=lambda r: -(r["t"] or 0)):
+        if not row["t"]:
+            continue
+        path = codecs.encode(row["n"], "rot13")
+        if path[:1] == "{":
+            path = KNOWN_FOLDERS.get(path[:38].upper(), "") + path[38:]
+        if not path.lower().endswith(".exe") or path.lower() in seen:
+            continue
+        if not os.path.isfile(path):
+            continue
+        seen.add(path.lower())
+        apps.append({"name": os.path.splitext(os.path.basename(path))[0], "path": path})
+        if len(apps) == RECENT_MAX:
+            break
+    return apps
+
+
 def apps_payload():
+    global _recents
     favs, windows = favorites(), list_windows()
-    icons = icons_for([a.get("path", "") for a in favs] + [w.get("Path") or "" for w in windows])
+    _recents = recents()
+    icons = icons_for([a.get("path", "") for a in favs]
+                      + [w.get("Path") or "" for w in windows]
+                      + [a["path"] for a in _recents])
     fav_paths = {a.get("path", "").lower() for a in favs}
     return {
         "favorites": [
@@ -169,6 +235,10 @@ def apps_payload():
              "icon": icons.get(w.get("Path") or ""),
              "fav": (w.get("Path") or "").lower() in fav_paths}
             for w in windows
+        ],
+        "recent": [
+            {"name": a["name"], "icon": icons.get(a["path"])}
+            for a in _recents
         ],
     }
 
@@ -184,7 +254,10 @@ def launch(path):
 def run(req):
     if "pid" in req:
         return focus(req["pid"])
-    path = favorites()[int(req["fav"])]["path"]
+    if "recent" in req:
+        path = _recents[int(req["recent"])]["path"]
+    else:
+        path = favorites()[int(req["fav"])]["path"]
     win = next((w for w in list_windows() if (w.get("Path") or "").lower() == path.lower()), None)
     if win:
         focus(win["Id"])
@@ -196,6 +269,11 @@ def edit_favorites(req):
     favs = favorites()
     if "remove" in req:
         favs.pop(int(req["remove"]))
+    elif "add_recent" in req:
+        app = _recents[int(req["add_recent"])]
+        if any(a.get("path", "").lower() == app["path"].lower() for a in favs):
+            return
+        favs.append({"name": app["name"], "path": app["path"]})
     else:
         pid = int(req["add"])
         win = next((w for w in list_windows() if w["Id"] == pid), None)
@@ -255,6 +333,9 @@ def selfcheck():
     assert p["running"], "nenhuma janela encontrada - PS_LIST quebrou"
     assert all({"pid", "name", "icon", "fav"} <= set(w) for w in p["running"])
     assert all(isinstance(w["pid"], int) for w in p["running"])
+    assert p["recent"], "nenhum app recente - PS_RECENT quebrou"
+    assert all({"name", "icon"} <= set(a) for a in p["recent"])
+    assert all(os.path.isfile(a["path"]) for a in _recents)
 
     probe = os.path.join(tempfile.gettempdir(), "deck-icon-check.png")
     try:
@@ -292,8 +373,8 @@ Start-Sleep -Milliseconds 400
     finally:
         ps("Stop-Process -Id %d -Force" % pid)
 
-    print("ok: %d abertos, %d favoritos, %d icones, manifest %d bytes, icon %d bytes"
-          % (len(p["running"]), len(p["favorites"]),
+    print("ok: %d abertos, %d favoritos, %d recentes, %d icones, manifest %d bytes, icon %d bytes"
+          % (len(p["running"]), len(p["favorites"]), len(p["recent"]),
              sum(1 for v in _icon_cache.values() if v), len(MANIFEST), len(ICON)))
 
 

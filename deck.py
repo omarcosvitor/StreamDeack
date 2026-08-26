@@ -43,12 +43,49 @@ ConvertTo-Json -InputObject @($w) -Depth 2 -Compress
 
 PS_ICONS = r"""
 Add-Type -AssemblyName System.Drawing
+$code = @"
+using System;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.IO;
+using System.Runtime.InteropServices;
+
+public static class DeckIcon {
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  static extern uint PrivateExtractIcons(string file, int index, int width, int height,
+                                         IntPtr[] icons, uint[] ids, uint count, uint flags);
+  [DllImport("user32.dll")]
+  static extern bool DestroyIcon(IntPtr icon);
+
+  public static string Png(string path) {
+    var icons = new IntPtr[1];
+    var ids = new uint[1];
+    var count = PrivateExtractIcons(path, 0, 256, 256, icons, ids, 1, 0);
+    if (count == 0 || count == UInt32.MaxValue || icons[0] == IntPtr.Zero) return null;
+    try {
+      using (var icon = (Icon)Icon.FromHandle(icons[0]).Clone())
+      using (var bitmap = icon.ToBitmap())
+      using (var stream = new MemoryStream()) {
+        bitmap.Save(stream, ImageFormat.Png);
+        return Convert.ToBase64String(stream.ToArray());
+      }
+    } finally {
+      DestroyIcon(icons[0]);
+    }
+  }
+}
+"@
+Add-Type -TypeDefinition $code -ReferencedAssemblies System.Drawing
 $out = @{}
 foreach ($p in @({PATHS})) {
   try {
-    $ms = New-Object System.IO.MemoryStream
-    [System.Drawing.Icon]::ExtractAssociatedIcon($p).ToBitmap().Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
-    $out[$p] = [Convert]::ToBase64String($ms.ToArray())
+    $png = [DeckIcon]::Png($p)
+    if (-not $png) {
+      $ms = New-Object System.IO.MemoryStream
+      [System.Drawing.Icon]::ExtractAssociatedIcon($p).ToBitmap().Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+      $png = [Convert]::ToBase64String($ms.ToArray())
+    }
+    $out[$p] = $png
   } catch { }
 }
 ConvertTo-Json -InputObject $out -Compress
@@ -152,8 +189,8 @@ MANIFEST = json.dumps({
     "start_url": "/",
     "display": "fullscreen",
     "orientation": "landscape",
-    "background_color": "#0b0d10",
-    "theme_color": "#0b0d10",
+    "background_color": "#f2f5f8",
+    "theme_color": "#f2f5f8",
     "icons": [{"src": "/icon.png", "sizes": "192x192", "type": "image/png"}],
 }).encode()
 

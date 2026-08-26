@@ -1,17 +1,19 @@
 <!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
-<meta name="theme-color" content="#0a0c0f">
+<meta name="theme-color" content="#f2f5f8">
+<meta name="color-scheme" content="light">
 <meta name="mobile-web-app-capable" content="yes">
 <link rel="manifest" href="/manifest.json">
 <link rel="icon" href="/icon.png">
 <title>Deck</title>
 <style>
+  :root { color-scheme:light; }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-  html, body { height:100%; overscroll-behavior:none; background:#06080a; }
+  html, body { height:100%; overscroll-behavior:none; background:#edf1f5; }
   body { margin:0; overflow:hidden;
-         color:#e7eaee; font:14px -apple-system,Roboto,Segoe UI,sans-serif;
-         background-image:radial-gradient(130% 95% at 50% -12%, #1a2029 0%, #0c0f13 52%, #06080a 100%);
+         color:#17212c; font:14px -apple-system,Roboto,Segoe UI,sans-serif;
+         background-image:radial-gradient(130% 95% at 50% -12%, #fff 0%, #f4f7fa 52%, #e8edf2 100%);
          touch-action:manipulation; user-select:none; -webkit-user-select:none; }
 
   #stage { position:fixed; left:0; top:0; right:0; bottom:0;
@@ -28,36 +30,36 @@
 
   .key { flex:none; margin:5px; border-radius:14px; }
 
-  .key { position:relative; border:0; padding:0; overflow:hidden; color:#e7eaee; font:inherit;
+  .key { position:relative; border:0; padding:0; overflow:hidden; color:#17212c; font:inherit;
          display:flex; align-items:center; justify-content:center;
-         background-color:#191d24;
-         box-shadow:inset 0 1px 0 rgba(255,255,255,.09),
-                    inset 0 -14px 26px rgba(0,0,0,.34),
-                    inset 0 0 0 1px rgba(255,255,255,.05),
-                    0 3px 9px rgba(0,0,0,.55);
+         background-color:#fff;
+         box-shadow:inset 0 1px 0 rgba(255,255,255,.95),
+                    inset 0 -14px 26px rgba(36,53,69,.055),
+                    0 4px 12px rgba(40,55,70,.18);
          transition:transform .1s ease; }
   .key.press { transform:scale(.935); }
-  .key.busy { opacity:.4; }
+  .key.busy { opacity:.52; }
+  .key:focus-visible { outline:3px solid #bd6517; outline-offset:3px; }
   .key .glow { position:absolute; left:0; top:0; right:0; bottom:0; border-radius:14px;
                opacity:0; pointer-events:none; transition:opacity .12s ease; }
   .key.press .glow { opacity:1; }
   .key img, .key .ph { flex:none; display:block; margin-bottom:15px; }
-  .key .ph { border-radius:11px; background:rgba(255,255,255,.10); color:rgba(255,255,255,.7);
+  .key .ph { border-radius:11px; background:#e2e8ee; color:#33485c;
              font-weight:600; display:flex; align-items:center; justify-content:center; }
   .key span { position:absolute; left:0; right:0; bottom:8px; padding:0 8px; text-align:center;
-              text-transform:uppercase; letter-spacing:.07em; color:rgba(255,255,255,.6);
+              text-transform:uppercase; letter-spacing:.07em; color:#526170;
               white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 
   #dots { position:fixed; left:0; right:0; bottom:5px; display:flex; justify-content:center;
           opacity:0; pointer-events:none; transition:opacity .35s ease; }
   #dots.on { opacity:1; }
-  #dots i { width:5px; height:5px; margin:0 4px; border-radius:50%; background:rgba(255,255,255,.2); }
-  #dots i.on { background:#e8933a; }
+  #dots i { width:5px; height:5px; margin:0 4px; border-radius:50%; background:#a8b3bd; }
+  #dots i.on { background:#c96d1d; }
 
   #toast { position:fixed; left:50%; bottom:22px; transform:translateX(-50%); max-width:82%;
            padding:9px 15px; border-radius:13px; font-size:12px; letter-spacing:.02em;
-           background:rgba(30,35,43,.96); color:#e7eaee;
-           box-shadow:0 8px 26px rgba(0,0,0,.6), inset 0 1px 0 rgba(255,255,255,.06);
+           background:rgba(255,255,255,.97); color:#233140;
+           box-shadow:0 8px 26px rgba(40,55,70,.22), inset 0 1px 0 rgba(255,255,255,.9);
            white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
            opacity:0; pointer-events:none; transition:opacity .22s ease; }
   #toast.on { opacity:1; }
@@ -85,6 +87,19 @@ var P = {
 };
 
 function vibe(ms) { if (navigator.vibrate) navigator.vibrate(ms); }
+
+// Chrome Android 135+ deixa um "chin" embaixo quando recolhe a barra de URL.
+// Em uma aba comum so o Fullscreen API pode esconder essa interface do browser.
+// O pedido precisa nascer de um gesto; aproveita o primeiro toque sem consumir a acao.
+function immersive() {
+  if (immersive.tried || document.fullscreenElement || !document.fullscreenEnabled) return;
+  if (!window.matchMedia('(pointer: coarse)').matches) return;
+  if (window.matchMedia('(display-mode: fullscreen)').matches ||
+      window.matchMedia('(display-mode: standalone)').matches) return;
+  immersive.tried = true;
+  var request = document.documentElement.requestFullscreen({ navigationUI: 'hide' });
+  if (request && request.catch) request.catch(function () { });
+}
 
 function toast(msg) {
   var t = document.getElementById('toast');
@@ -130,8 +145,8 @@ function paint(key, glow, img) {
     if (!tints[img.src]) tints[img.src] = sample(img);
     c = tints[img.src];
   }
-  key.style.backgroundImage = 'linear-gradient(158deg, rgba(' + c + ',.34), rgba(' + c + ',.05) 58%, rgba(0,0,0,.24))';
-  glow.style.boxShadow = 'inset 0 0 0 2px rgba(' + c + ',.9), inset 0 0 22px rgba(' + c + ',.4)';
+  key.style.backgroundImage = 'linear-gradient(158deg, rgba(' + c + ',.18), rgba(' + c + ',.045) 58%, rgba(255,255,255,.94))';
+  glow.style.boxShadow = 'inset 0 0 0 2px rgba(' + c + ',.78), inset 0 0 22px rgba(' + c + ',.16)';
 }
 
 function press(el, tap, hold) {
@@ -158,10 +173,13 @@ function press(el, tap, hold) {
     off();
     e.preventDefault();
     if (dead) return;
+    immersive();
     vibe(12);
     tap(el);
   });
-  el.onclick = function () { if (!('ontouchstart' in window)) tap(el); };
+  el.onclick = function () {
+    if (!('ontouchstart' in window)) { immersive(); tap(el); }
+  };
 }
 
 function buildKey(item, size, tap, hold) {

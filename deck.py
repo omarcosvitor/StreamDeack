@@ -30,6 +30,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 FAVS = os.path.join(HERE, "apps.json")
 PORT = int(os.environ.get("DECK_PORT", 8765))
 RECENT_MAX = int(os.environ.get("DECK_RECENT_MAX", 24))
+# ponytail: com a sessao bloqueada esse processo segura o foreground e ninguem
+# toma o lugar dele - a trava so da pra testar com a area de trabalho aberta.
+LOCK_SCREEN = "LockApp"
 
 PS_LIST = r"""
 $ErrorActionPreference = 'SilentlyContinue'
@@ -60,6 +63,7 @@ public class Deck {
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
   [DllImport("user32.dll")] public static extern void keybd_event(byte k, byte s, uint f, UIntPtr e);
+  [DllImport("user32.dll")] public static extern int GetWindowThreadProcessId(IntPtr h, out int pid);
 }
 "@
 """
@@ -74,6 +78,12 @@ PS_ACTIVATE = r"""
 """
 
 PS_FOCUS = PS_WIN32 + "$h = (Get-Process -Id {PID}).MainWindowHandle" + PS_ACTIVATE
+
+PS_FGOWNER = PS_WIN32 + r"""
+$owner = 0
+[Deck]::GetWindowThreadProcessId([Deck]::GetForegroundWindow(), [ref]$owner) | Out-Null
+(Get-Process -Id $owner).ProcessName
+"""
 
 PS_LAUNCH = PS_WIN32 + r"""
 $before = @(Get-Process | Where-Object { $_.MainWindowHandle } | ForEach-Object { $_.MainWindowHandle })
@@ -353,25 +363,28 @@ Start-Sleep -Milliseconds 400
 [Deck]::keybd_event(0x10, 0, 0, [UIntPtr]::Zero)
 [Deck]::keybd_event(0x10, 0, 2, [UIntPtr]::Zero)
 """
-    other = list_windows()[0]
-    other_h = int(ps("(Get-Process -Id %d).MainWindowHandle" % other["Id"]))
-    invalido = "nao consegui armar a trava de foreground - teste invalido"
+    if ps(PS_FGOWNER) == LOCK_SCREEN:
+        print("aviso: sessao bloqueada, teste da trava de foreground pulado")
+    else:
+        other = list_windows()[0]
+        other_h = int(ps("(Get-Process -Id %d).MainWindowHandle" % other["Id"]))
+        invalido = "nao consegui armar a trava de foreground - teste invalido"
 
-    ps(arm.replace("{PID}", str(other["Id"])))
-    assert int(ps(fg)) == other_h, invalido
-    launch("notepad.exe")
-    pid = int(ps("(Get-Process notepad | Sort-Object StartTime | Select-Object -Last 1).Id"))
-    handle = int(ps("(Get-Process -Id %d).MainWindowHandle" % pid))
-    try:
-        time.sleep(0.6)
-        assert int(ps(fg)) == handle, "app recem-lancado ficou atras (trava de foreground)"
         ps(arm.replace("{PID}", str(other["Id"])))
         assert int(ps(fg)) == other_h, invalido
-        focus(pid)
-        time.sleep(0.6)
-        assert int(ps(fg)) == handle, "janela existente ficou atras (trava de foreground)"
-    finally:
-        ps("Stop-Process -Id %d -Force" % pid)
+        launch("notepad.exe")
+        pid = int(ps("(Get-Process notepad | Sort-Object StartTime | Select-Object -Last 1).Id"))
+        handle = int(ps("(Get-Process -Id %d).MainWindowHandle" % pid))
+        try:
+            time.sleep(0.6)
+            assert int(ps(fg)) == handle, "app recem-lancado ficou atras (trava de foreground)"
+            ps(arm.replace("{PID}", str(other["Id"])))
+            assert int(ps(fg)) == other_h, invalido
+            focus(pid)
+            time.sleep(0.6)
+            assert int(ps(fg)) == handle, "janela existente ficou atras (trava de foreground)"
+        finally:
+            ps("Stop-Process -Id %d -Force" % pid)
 
     print("ok: %d abertos, %d favoritos, %d recentes, %d icones, manifest %d bytes, icon %d bytes"
           % (len(p["running"]), len(p["favorites"]), len(p["recent"]),

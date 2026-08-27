@@ -61,7 +61,7 @@ if _WINDOWS:
     from ctypes import wintypes
 
     GW_OWNER = 4
-    SW_RESTORE = 9
+    SW_MAXIMIZE = 3
     VK_MENU = 0x12
     VK_SHIFT = 0x10
     KEYEVENTF_KEYUP = 2
@@ -400,10 +400,12 @@ def apps_payload():
 
 # ponytail: o toque no ALT dribla o foreground lock do Windows. Sem ele o
 # SetForegroundWindow devolve False e a janela abre atras das outras.
+# Maximiza sempre - do celular nao da pra arrastar borda pra redimensionar,
+# entao a janela pequena que o app abre por padrao so atrapalha.
 def activate(hwnd):
     _keybd_event(VK_MENU, 0, 0, 0)
     _keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
-    _ShowWindow(hwnd, SW_RESTORE)
+    _ShowWindow(hwnd, SW_MAXIMIZE)
     _SetForegroundWindow(hwnd)
 
 

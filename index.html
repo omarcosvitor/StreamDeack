@@ -23,7 +23,7 @@
   .row { height:100%; display:flex; overflow-x:scroll; overflow-y:hidden;
          scroll-snap-type:x mandatory; scroll-snap-align:start; scroll-snap-stop:always;
          overscroll-behavior-x:contain; -webkit-overflow-scrolling:touch; }
-  .page { flex:none; width:100%; height:100%; padding:5px;
+  .page { flex:none; width:100%; height:100%; padding:5px; contain:layout style;
           scroll-snap-align:start; scroll-snap-stop:always;
           display:flex; flex-wrap:wrap; align-content:center; justify-content:center; }
   #stage::-webkit-scrollbar, .row::-webkit-scrollbar { width:0; height:0; }
@@ -40,6 +40,7 @@
   .key.press { transform:scale(.935); }
   .key.busy { opacity:.52; }
   .key:focus-visible { outline:3px solid #bd6517; outline-offset:3px; }
+  .key > * { pointer-events:none; }
   .key .glow { position:absolute; left:0; top:0; right:0; bottom:0; border-radius:14px;
                opacity:0; pointer-events:none; transition:opacity .12s ease; }
   .key.press .glow { opacity:1; }
@@ -75,16 +76,33 @@
 <div id="toast"></div>
 <script>
 var data = { favorites: [], running: [], recent: [] };
-var grid = { cols: 5, rows: 3, gap: 10, size: 100 };
+var grid = { cols: 5, rows: 3, gap: 10, pad: 5, size: 100, w: 0, h: 0 };
 var tints = {};
+var skins = {};
 var stage = document.getElementById('stage');
 var rowFav = document.getElementById('row-fav');
+var toastEl = document.getElementById('toast');
+var dotsEl = document.getElementById('dots');
+var dotA = dotsEl.firstElementChild;
+var dotB = dotsEl.lastElementChild;
 var P = {
   open: document.getElementById('p-open'),
   fav0: document.getElementById('p-fav0'),
   fav1: document.getElementById('p-fav1'),
   recent: document.getElementById('p-recent')
 };
+
+// ponytail: molde clonado em vez de montar 3 nos por tecla. cloneNode e bem
+// mais barato que createElement + appendChild a cada redesenho.
+var MOLD = (function () {
+  var b = document.createElement('button');
+  b.className = 'key';
+  var g = document.createElement('i');
+  g.className = 'glow';
+  b.appendChild(g);
+  b.appendChild(document.createElement('span'));
+  return b;
+})();
 
 function vibe(ms) { if (navigator.vibrate) navigator.vibrate(ms); }
 
@@ -102,16 +120,15 @@ function immersive() {
 }
 
 function toast(msg) {
-  var t = document.getElementById('toast');
-  t.textContent = msg;
-  t.className = 'on';
+  toastEl.textContent = msg;
+  toastEl.className = 'on';
   clearTimeout(toast.timer);
-  toast.timer = setTimeout(function () { t.className = ''; }, 2400);
+  toast.timer = setTimeout(function () { toastEl.className = ''; }, 2400);
 }
 
 function post(url, body, key) {
-  key.className += ' busy';
-  function done() { key.className = key.className.replace(' busy', ''); }
+  key.classList.add('busy');
+  function done() { key.classList.remove('busy'); }
   return fetch(url, { method: 'POST', body: JSON.stringify(body) }).then(function (r) {
     done();
     if (!r.ok) toast(r.statusText || 'o PC recusou');
@@ -121,13 +138,19 @@ function post(url, body, key) {
 
 // ponytail: cor dominante = pixel mais saturado de um thumbnail 12x12. Media simples
 // vira cinza; quantizacao de verdade nao vale o codigo pra um icone de 32px.
+// Um unico canvas serve todas as leituras - criar um por icone so dava trabalho ao GC.
+var shot = null, shotCx = null;
 function sample(img) {
   try {
-    var n = 12, cv = document.createElement('canvas');
-    cv.width = cv.height = n;
-    var cx = cv.getContext('2d');
-    cx.drawImage(img, 0, 0, n, n);
-    var d = cx.getImageData(0, 0, n, n).data, best = null, score = 0;
+    var n = 12;
+    if (!shot) {
+      shot = document.createElement('canvas');
+      shot.width = shot.height = n;
+      shotCx = shot.getContext('2d', { willReadFrequently: true });
+    }
+    shotCx.clearRect(0, 0, n, n);
+    shotCx.drawImage(img, 0, 0, n, n);
+    var d = shotCx.getImageData(0, 0, n, n).data, best = null, score = 0;
     for (var i = 0; i < d.length; i += 4) {
       if (d[i + 3] < 150) continue;
       var r = d[i], g = d[i + 1], b = d[i + 2];
@@ -141,147 +164,181 @@ function sample(img) {
 
 function paint(key, glow, img) {
   var c = [104, 124, 148];
-  if (img) {
-    if (!tints[img.src]) tints[img.src] = sample(img);
-    c = tints[img.src];
+  if (img) c = tints[img.src] || (tints[img.src] = sample(img));
+  var skin = skins[c];
+  if (!skin) {
+    skin = skins[c] = {
+      bg: 'linear-gradient(158deg, rgba(' + c + ',.18), rgba(' + c + ',.045) 58%, rgba(255,255,255,.94))',
+      ring: 'inset 0 0 0 2px rgba(' + c + ',.78), inset 0 0 22px rgba(' + c + ',.16)'
+    };
   }
-  key.style.backgroundImage = 'linear-gradient(158deg, rgba(' + c + ',.18), rgba(' + c + ',.045) 58%, rgba(255,255,255,.94))';
-  glow.style.boxShadow = 'inset 0 0 0 2px rgba(' + c + ',.78), inset 0 0 22px rgba(' + c + ',.16)';
+  key.style.backgroundImage = skin.bg;
+  glow.style.boxShadow = skin.ring;
 }
 
-function press(el, tap, hold) {
-  var timer, dead, sx, sy;
-  function on() { el.className += ' press'; }
-  function off() { el.className = el.className.replace(' press', ''); }
-  el.addEventListener('touchstart', function (e) {
-    dead = false;
-    on();
-    sx = e.touches[0].clientX;
-    sy = e.touches[0].clientY;
-    timer = setTimeout(function () { dead = true; off(); vibe(32); hold(el); }, 520);
-  });
-  el.addEventListener('touchmove', function (e) {
-    var t = e.touches[0];
-    if (Math.abs(t.clientX - sx) > 12 || Math.abs(t.clientY - sy) > 12) {
-      clearTimeout(timer);
-      dead = true;
-      off();
-    }
-  });
-  el.addEventListener('touchend', function (e) {
-    clearTimeout(timer);
-    off();
-    e.preventDefault();
-    if (dead) return;
-    immersive();
-    vibe(12);
-    tap(el);
-  });
-  el.onclick = function () {
-    if (!('ontouchstart' in window)) { immersive(); tap(el); }
-  };
+// ponytail: um unico jogo de listeners no palco em vez de quatro por tecla.
+// touchstart/touchmove sao passivos: o navegador rola o painel sem esperar
+// resposta do script. So o touchend precisa barrar o clique sintetico.
+var held = null, holdTimer = 0, dead = false, sx = 0, sy = 0;
+
+function letGo() {
+  clearTimeout(holdTimer);
+  if (held) held.classList.remove('press');
 }
 
-function buildKey(item, size, tap, hold) {
-  var b = document.createElement('button');
-  b.className = 'key';
-  b.style.width = b.style.height = size + 'px';
-  var glow = document.createElement('i');
-  glow.className = 'glow';
-  b.appendChild(glow);
+stage.addEventListener('touchstart', function (e) {
+  var k = e.target.closest ? e.target.closest('.key') : null;
+  if (!k) return;
+  letGo();
+  held = k;
+  dead = false;
+  k.classList.add('press');
+  sx = e.touches[0].clientX;
+  sy = e.touches[0].clientY;
+  holdTimer = setTimeout(function () {
+    dead = true;
+    k.classList.remove('press');
+    vibe(32);
+    hold(k);
+  }, 520);
+}, { passive: true });
+
+stage.addEventListener('touchmove', function (e) {
+  if (!held || dead) return;
+  var t = e.touches[0];
+  if (Math.abs(t.clientX - sx) > 12 || Math.abs(t.clientY - sy) > 12) {
+    dead = true;
+    letGo();
+  }
+}, { passive: true });
+
+stage.addEventListener('touchend', function (e) {
+  if (!held) return;
+  var k = held;
+  held = null;
+  letGo();
+  k.classList.remove('press');
+  e.preventDefault();
+  if (dead) return;
+  immersive();
+  vibe(12);
+  tap(k);
+}, { passive: false });
+
+stage.addEventListener('touchcancel', function () {
+  dead = true;
+  letGo();
+  held = null;
+}, { passive: true });
+
+stage.addEventListener('click', function (e) {
+  if ('ontouchstart' in window) return;
+  var k = e.target.closest ? e.target.closest('.key') : null;
+  if (!k) return;
+  immersive();
+  tap(k);
+});
+
+function tap(k) {
+  if (k.kind === 'open') return post('/api/run', { pid: k.idx }, k);
+  if (k.kind === 'recent') return post('/api/run', { recent: k.idx }, k);
+  post('/api/run', { fav: k.idx }, k);
+}
+
+function hold(k) {
+  if (k.kind === 'fav') return post('/api/fav', { remove: k.idx }, k).then(load);
+  if (k.kind === 'recent') return post('/api/fav', { add_recent: k.idx }, k).then(load);
+  if (k.isFav) return toast(k.label + ' ja esta nos favoritos');
+  post('/api/fav', { add: k.idx }, k).then(load);
+}
+
+function buildKey(item, size, kind, idx) {
+  var b = MOLD.cloneNode(true);
+  var glow = b.firstChild;
+  var sp = b.lastChild;
+  b.style.cssText = 'width:' + size + 'px;height:' + size + 'px';
   var art, as = Math.min(46, Math.round(size * 0.40));
   if (item.icon) {
-    art = document.createElement('img');
+    art = new Image();
+    art.decoding = 'async';
+    art.style.cssText = 'width:' + as + 'px;height:' + as + 'px';
     art.onload = function () { paint(b, glow, art); };
     art.src = item.icon;
   } else {
     art = document.createElement('div');
     art.className = 'ph';
     art.textContent = (item.name || '?').charAt(0).toUpperCase();
-    art.style.fontSize = Math.round(as * 0.5) + 'px';
+    art.style.cssText = 'width:' + as + 'px;height:' + as + 'px;font-size:' +
+                        Math.round(as * 0.5) + 'px';
     paint(b, glow, null);
   }
-  art.style.width = art.style.height = as + 'px';
-  b.appendChild(art);
-  var sp = document.createElement('span');
+  b.insertBefore(art, sp);
   sp.textContent = item.name;
   sp.style.fontSize = Math.max(9, Math.round(size * 0.1)) + 'px';
-  b.appendChild(sp);
-  press(b, tap, hold);
+  b.kind = kind;
+  b.idx = idx;
+  b.isFav = item.fav;
+  b.label = item.name;
   return b;
 }
 
-function layout() {
-  var pad = 5, gap = 10;
-  var iw = stage.clientWidth - pad * 2, ih = stage.clientHeight - pad * 2;
-  var cols = Math.max(3, Math.min(8, Math.round(iw / 126)));
-  var rows = Math.max(1, Math.floor(ih / (iw / cols)));
-  grid = { cols: cols, rows: rows, gap: gap, pad: pad,
-           size: Math.max(52, Math.min(140, Math.floor(Math.min(iw / cols, ih / rows)) - gap)) };
+// ponytail: monta fora da arvore e troca de uma vez - o navegador calcula
+// layout uma vez por painel em vez de uma vez por tecla.
+function fill(page, items, size, kind, from, count) {
+  var frag = document.createDocumentFragment();
+  var end = Math.min(items.length, from + count);
+  for (var i = from; i < end; i++) {
+    var a = items[i];
+    frag.appendChild(buildKey(a, size, kind, kind === 'open' ? a.pid : i));
+  }
+  page.textContent = '';
+  page.appendChild(frag);
 }
 
 // ponytail: escolhe a coluna que deixa a tecla maior, nunca maior que a dos favoritos.
 function autoSize(n) {
-  var iw = stage.clientWidth - grid.pad * 2, ih = stage.clientHeight - grid.pad * 2, best = 0;
+  var best = 0;
   for (var c = 1; c <= n; c++) {
-    var s = Math.min(iw / c, ih / Math.ceil(n / c)) - grid.gap;
+    var s = Math.min(grid.w / c, grid.h / Math.ceil(n / c)) - grid.gap;
     if (s > best) best = s;
   }
   return Math.max(52, Math.min(grid.size, Math.floor(best)));
 }
 
-function favPage(page, from) {
-  page.innerHTML = '';
-  var end = Math.min(data.favorites.length, from + grid.cols * grid.rows);
-  for (var i = from; i < end; i++) page.appendChild(favKey(data.favorites[i], i));
-}
-
-function favKey(a, idx) {
-  return buildKey(a, grid.size,
-    function (b) { post('/api/run', { fav: idx }, b); },
-    function (b) { post('/api/fav', { remove: idx }, b).then(load); });
-}
-
-function openKey(a, size) {
-  return buildKey(a, size,
-    function (b) { post('/api/run', { pid: a.pid }, b); },
-    function (b) {
-      if (a.fav) return toast(a.name + ' ja esta nos favoritos');
-      post('/api/fav', { add: a.pid }, b).then(load);
-    });
-}
-
-function recentKey(a, idx, size) {
-  return buildKey(a, size,
-    function (b) { post('/api/run', { recent: idx }, b); },
-    function (b) { post('/api/fav', { add_recent: idx }, b).then(load); });
-}
-
 function render() {
-  layout();
-  var per = grid.cols * grid.rows;
-  favPage(P.fav0, 0);
-  favPage(P.fav1, per);
-  P.fav1.style.display = data.favorites.length > per ? '' : 'none';
+  // Le o tamanho do palco antes de mexer no DOM: evita layout sincrono no meio.
+  var pad = 5, gap = 10;
+  var w = stage.clientWidth - pad * 2, h = stage.clientHeight - pad * 2;
+  var cols = Math.max(3, Math.min(8, Math.round(w / 126)));
+  var rows = Math.max(1, Math.floor(h / (w / cols)));
+  grid = { cols: cols, rows: rows, gap: gap, pad: pad, w: w, h: h,
+           size: Math.max(52, Math.min(140, Math.floor(Math.min(w / cols, h / rows)) - gap)) };
 
-  P.open.innerHTML = '';
-  var size = autoSize(data.running.length || 1);
-  data.running.forEach(function (a) { P.open.appendChild(openKey(a, size)); });
+  var per = cols * rows;
+  fill(P.fav0, data.favorites, grid.size, 'fav', 0, per);
+  fill(P.fav1, data.favorites, grid.size, 'fav', per, per);
+  var second = data.favorites.length > per ? '' : 'none';
+  if (P.fav1.style.display !== second) P.fav1.style.display = second;
 
-  P.recent.innerHTML = '';
-  size = autoSize(data.recent.length || 1);
-  data.recent.forEach(function (a, i) { P.recent.appendChild(recentKey(a, i, size)); });
+  fill(P.open, data.running, autoSize(data.running.length || 1), 'open', 0, data.running.length);
+  fill(P.recent, data.recent, autoSize(data.recent.length || 1), 'recent', 0, data.recent.length);
 }
 
+// ponytail: o scroll dispara dezenas de eventos por segundo. Um quadro basta.
+var dotsFrame = 0;
 function dots() {
-  var d = document.getElementById('dots');
-  if (P.fav1.style.display === 'none') { d.className = ''; return; }
+  if (!dotsFrame) dotsFrame = requestAnimationFrame(paintDots);
+}
+
+function paintDots() {
+  dotsFrame = 0;
+  if (P.fav1.style.display === 'none') { dotsEl.className = ''; return; }
   var page = rowFav.scrollLeft > rowFav.clientWidth / 2 ? 1 : 0;
-  d.childNodes[0].className = page ? '' : 'on';
-  d.childNodes[1].className = page ? 'on' : '';
-  d.className = Math.abs(stage.scrollTop - stage.clientHeight) < 4 ? 'on' : '';
-  clearTimeout(dots.timer);
-  dots.timer = setTimeout(function () { d.className = ''; }, 1400);
+  dotA.className = page ? '' : 'on';
+  dotB.className = page ? 'on' : '';
+  dotsEl.className = Math.abs(stage.scrollTop - stage.clientHeight) < 4 ? 'on' : '';
+  clearTimeout(paintDots.timer);
+  paintDots.timer = setTimeout(function () { dotsEl.className = ''; }, 1400);
 }
 
 function load() {
@@ -291,8 +348,8 @@ function load() {
   }, function () { toast('sem conexao com o PC'); });
 }
 
-stage.addEventListener('scroll', dots);
-rowFav.addEventListener('scroll', dots);
+stage.addEventListener('scroll', dots, { passive: true });
+rowFav.addEventListener('scroll', dots, { passive: true });
 // ponytail: a barra de URL do Chrome some e volta durante o scroll e dispara resize.
 // Redesenhar no meio do fling deixa painel cortado - espera parar e recoloca no lugar.
 function reflow() {

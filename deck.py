@@ -15,7 +15,10 @@ remove dos favoritos.
 Favoritos ficam em apps.json (name + path). path aceita .exe, .lnk, pasta ou URL.
 Porta: variavel de ambiente DECK_PORT (padrao 8765).
 """
+import base64
 import codecs
+import gzip
+import hashlib
 import http.server
 import json
 import os
@@ -45,14 +48,57 @@ RECENT_MAX = int(os.environ.get("DECK_RECENT_MAX", 24))
 # ponytail: com a sessao bloqueada esse processo segura o foreground e ninguem
 # toma o lugar dele - a trava so da pra testar com a area de trabalho aberta.
 LOCK_SCREEN = "LockApp"
+USER_ASSIST = r"Software\Microsoft\Windows\CurrentVersion\Explorer\UserAssist"
 
-PS_LIST = r"""
-$ErrorActionPreference = 'SilentlyContinue'
-$w = Get-Process | Where-Object { $_.MainWindowTitle } |
-     Select-Object Id, ProcessName, MainWindowTitle, @{n='Path';e={$_.Path}}
-ConvertTo-Json -InputObject @($w) -Depth 2 -Compress
-"""
+# ponytail: janelas, foco, lancamento e recentes falam direto com o Win32 e com
+# o registro. A versao antiga abria um powershell.exe por acao - e o Add-Type
+# ainda chamava o compilador de C# a cada toque, o que custava segundos.
+_WINDOWS = sys.platform == "win32"
 
+if _WINDOWS:
+    import ctypes
+    import winreg
+    from ctypes import wintypes
+
+    GW_OWNER = 4
+    SW_RESTORE = 9
+    VK_MENU = 0x12
+    VK_SHIFT = 0x10
+    KEYEVENTF_KEYUP = 2
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+    _user32 = ctypes.WinDLL("user32", use_last_error=True)
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _ENUM_PROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def _bind(dll, name, restype, *argtypes):
+        fn = getattr(dll, name)
+        fn.restype = restype
+        fn.argtypes = argtypes
+        return fn
+
+    _EnumWindows = _bind(_user32, "EnumWindows", wintypes.BOOL, _ENUM_PROC, wintypes.LPARAM)
+    _IsWindowVisible = _bind(_user32, "IsWindowVisible", wintypes.BOOL, wintypes.HWND)
+    _GetWindow = _bind(_user32, "GetWindow", wintypes.HWND, wintypes.HWND, wintypes.UINT)
+    _GetWindowTextLengthW = _bind(_user32, "GetWindowTextLengthW", ctypes.c_int, wintypes.HWND)
+    _GetWindowTextW = _bind(_user32, "GetWindowTextW", ctypes.c_int,
+                            wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
+    _GetWindowThreadProcessId = _bind(_user32, "GetWindowThreadProcessId", wintypes.DWORD,
+                                      wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
+    _GetForegroundWindow = _bind(_user32, "GetForegroundWindow", wintypes.HWND)
+    _SetForegroundWindow = _bind(_user32, "SetForegroundWindow", wintypes.BOOL, wintypes.HWND)
+    _ShowWindow = _bind(_user32, "ShowWindow", wintypes.BOOL, wintypes.HWND, ctypes.c_int)
+    _keybd_event = _bind(_user32, "keybd_event", None, ctypes.c_ubyte, ctypes.c_ubyte,
+                         wintypes.DWORD, ctypes.c_size_t)
+    _OpenProcess = _bind(_kernel32, "OpenProcess", wintypes.HANDLE,
+                         wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    _CloseHandle = _bind(_kernel32, "CloseHandle", wintypes.BOOL, wintypes.HANDLE)
+    _QueryFullProcessImageNameW = _bind(_kernel32, "QueryFullProcessImageNameW", wintypes.BOOL,
+                                        wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                                        ctypes.POINTER(wintypes.DWORD))
+
+# ponytail: unico script que sobrou. Extrair icone precisa de GDI+, e o
+# resultado fica em cache - roda uma vez por executavel, nao por requisicao.
 PS_ICONS = r"""
 Add-Type -AssemblyName System.Drawing
 $code = @"
@@ -72,7 +118,7 @@ public static class DeckIcon {
   public static string Png(string path) {
     var icons = new IntPtr[1];
     var ids = new uint[1];
-    var count = PrivateExtractIcons(path, 0, 256, 256, icons, ids, 1, 0);
+    var count = PrivateExtractIcons(path, 0, 128, 128, icons, ids, 1, 0);
     if (count == 0 || count == UInt32.MaxValue || icons[0] == IntPtr.Zero) return null;
     try {
       using (var icon = (Icon)Icon.FromHandle(icons[0]).Clone())
@@ -103,68 +149,6 @@ foreach ($p in @({PATHS})) {
 ConvertTo-Json -InputObject $out -Compress
 """
 
-PS_WIN32 = r"""
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public class Deck {
-  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
-  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
-  [DllImport("user32.dll")] public static extern void keybd_event(byte k, byte s, uint f, UIntPtr e);
-  [DllImport("user32.dll")] public static extern int GetWindowThreadProcessId(IntPtr h, out int pid);
-}
-"@
-"""
-
-# ponytail: o toque no ALT dribla o foreground lock do Windows. Sem ele o
-# SetForegroundWindow devolve False e a janela abre atras das outras.
-PS_ACTIVATE = r"""
-[Deck]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)
-[Deck]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)
-[Deck]::ShowWindow($h, 9) | Out-Null
-[Deck]::SetForegroundWindow($h) | Out-Null
-"""
-
-PS_FOCUS = PS_WIN32 + "$h = (Get-Process -Id {PID}).MainWindowHandle" + PS_ACTIVATE
-
-PS_FGOWNER = PS_WIN32 + r"""
-$owner = 0
-[Deck]::GetWindowThreadProcessId([Deck]::GetForegroundWindow(), [ref]$owner) | Out-Null
-(Get-Process -Id $owner).ProcessName
-"""
-
-PS_LAUNCH = PS_WIN32 + r"""
-$before = @(Get-Process | Where-Object { $_.MainWindowHandle } | ForEach-Object { $_.MainWindowHandle })
-Start-Process -FilePath '{PATH}'
-foreach ($try in 1..20) {
-  Start-Sleep -Milliseconds 250
-  $h = @(Get-Process | Where-Object { $_.MainWindowHandle -and $before -notcontains $_.MainWindowHandle } |
-         ForEach-Object { $_.MainWindowHandle })[0]
-  if ($h) {""" + PS_ACTIVATE + """    break
-  }
-}
-"""
-
-# ponytail: o UserAssist e a propria lista de "mais usados" do menu Iniciar.
-# Nomes em ROT13, ultimo uso em FILETIME no offset 60. Decodifico no Python.
-PS_RECENT = r"""
-$ErrorActionPreference = 'SilentlyContinue'
-$out = @()
-foreach ($s in Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\UserAssist') {
-  $c = Join-Path $s.PSPath 'Count'
-  if (-not (Test-Path $c)) { continue }
-  $p = Get-ItemProperty $c
-  foreach ($n in $p.PSObject.Properties.Name) {
-    if ($n -like 'PS*') { continue }
-    $d = $p.$n
-    if ($d -isnot [byte[]] -or $d.Length -lt 68) { continue }
-    $out += [pscustomobject]@{ n = $n; t = [BitConverter]::ToInt64($d, 60) }
-  }
-}
-ConvertTo-Json -InputObject @($out) -Compress
-"""
-
 KNOWN_FOLDERS = {
     "{6D809377-6AF0-444B-8957-A3773F02200E}": os.environ.get("ProgramW6432", ""),
     "{7C5A40EF-A0FB-4BFC-874A-C0F2E0B9FA8E}": os.environ.get("ProgramFiles(x86)", ""),
@@ -175,7 +159,12 @@ KNOWN_FOLDERS = {
     "{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}": os.path.join(os.environ.get("USERPROFILE", ""), "Desktop"),
 }
 
+# ponytail: o icone vira URL propria (/i/<hash>.png) em vez de data: no JSON.
+# O celular baixa cada PNG uma vez e reusa do cache do navegador; o payload das
+# recargas cai de centenas de kB para poucos kB.
 _icon_cache = {}
+_icon_data = {}
+_payload_lock = threading.Lock()
 # ponytail: o celular manda o indice, nunca o caminho - mesma regra dos favoritos.
 # Guardo a ultima lista servida pro indice nao apontar pra outro app.
 _recents = []
@@ -204,7 +193,36 @@ MANIFEST = json.dumps({
     "background_color": "#f2f5f8",
     "theme_color": "#f2f5f8",
     "icons": [{"src": "/icon.png", "sizes": "192x192", "type": "image/png"}],
-}).encode()
+}, separators=(",", ":")).encode()
+
+IMMUTABLE = "public, max-age=31536000, immutable"
+REVALIDATE = "no-cache"
+NO_STORE = "no-store"
+
+
+def etag_of(body):
+    return '"%s"' % hashlib.blake2b(body, digest_size=8).hexdigest()
+
+
+MANIFEST_ETAG = etag_of(MANIFEST)
+MANIFEST_GZ = gzip.compress(MANIFEST, 9)
+ICON_ETAG = etag_of(ICON)
+
+_index = None
+
+
+def index_asset():
+    """(corpo, gzip, etag) do index.html, relido so quando o arquivo muda."""
+    global _index
+    path = os.path.join(BUNDLE_DIR, "index.html")
+    stamp = os.stat(path).st_mtime_ns
+    cached = _index
+    if cached is None or cached[0] != stamp:
+        with open(path, "rb") as f:
+            body = f.read()
+        cached = (stamp, body, gzip.compress(body, 9), etag_of(body))
+        _index = cached
+    return cached[1:]
 
 
 def ps(script):
@@ -234,12 +252,65 @@ def save_favorites(favs):
         json.dump(favs, f, indent=2, ensure_ascii=False)
 
 
+def main_windows():
+    """(hwnd, pid) da janela principal de cada processo, na ordem do EnumWindows.
+
+    Mesma regra do MainWindowHandle do .NET: primeira janela visivel e sem dono.
+    """
+    found = []
+    seen = set()
+    pid = wintypes.DWORD()
+    ref = ctypes.byref(pid)
+
+    def visit(hwnd, _):
+        if _IsWindowVisible(hwnd) and not _GetWindow(hwnd, GW_OWNER):
+            _GetWindowThreadProcessId(hwnd, ref)
+            if pid.value not in seen:
+                seen.add(pid.value)
+                found.append((hwnd, pid.value))
+        return True
+
+    _EnumWindows(_ENUM_PROC(visit), 0)
+    return found
+
+
+def window_title(hwnd):
+    length = _GetWindowTextLengthW(hwnd)
+    if not length:
+        return ""
+    buf = ctypes.create_unicode_buffer(length + 1)
+    _GetWindowTextW(hwnd, buf, length + 1)
+    return buf.value
+
+
+def process_path(pid, buf, size):
+    handle = _OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return ""
+    try:
+        size.value = len(buf)
+        return buf.value if _QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)) else ""
+    finally:
+        _CloseHandle(handle)
+
+
 def list_windows():
-    out = ps(PS_LIST)
-    data = json.loads(out) if out else []
-    if isinstance(data, dict):
-        data = [data]
-    return sorted(data or [], key=lambda w: (w["ProcessName"] or "").lower())
+    buf = ctypes.create_unicode_buffer(4096)
+    size = wintypes.DWORD()
+    out = []
+    for hwnd, pid in main_windows():
+        title = window_title(hwnd)
+        if not title:
+            continue
+        path = process_path(pid, buf, size)
+        out.append({
+            "Id": pid,
+            "ProcessName": os.path.splitext(os.path.basename(path))[0] if path else title,
+            "MainWindowTitle": title,
+            "Path": path,
+        })
+    out.sort(key=lambda w: (w["ProcessName"].lower(), w["Id"]))
+    return out
 
 
 def icons_for(paths):
@@ -248,28 +319,50 @@ def icons_for(paths):
         literals = ",".join("'" + p.replace("'", "''") + "'" for p in missing)
         got = json.loads(ps(PS_ICONS.replace("{PATHS}", literals)) or "{}")
         for p in missing:
-            _icon_cache[p] = got.get(p)
-    return {p: "data:image/png;base64," + _icon_cache[p] for p in paths if _icon_cache.get(p)}
+            encoded = got.get(p)
+            url = None
+            if encoded:
+                blob = base64.b64decode(encoded)
+                name = hashlib.blake2b(blob, digest_size=8).hexdigest()
+                _icon_data[name] = blob
+                url = "/i/" + name + ".png"
+            _icon_cache[p] = url
+    return {p: _icon_cache[p] for p in paths if _icon_cache.get(p)}
 
 
-def recents():
-    out = ps(PS_RECENT)
-    rows = json.loads(out) if out else []
-    if isinstance(rows, dict):
-        rows = [rows]
-    seen = {a.get("path", "").lower() for a in favorites()}
+# ponytail: o UserAssist e a propria lista de "mais usados" do menu Iniciar.
+# Nomes em ROT13, ultimo uso em FILETIME no offset 60. Leio direto do registro.
+def recents(favs):
+    rows = []
+    try:
+        root = winreg.OpenKey(winreg.HKEY_CURRENT_USER, USER_ASSIST)
+    except OSError:
+        return []
+    with root:
+        for i in range(winreg.QueryInfoKey(root)[0]):
+            try:
+                with winreg.OpenKey(root, winreg.EnumKey(root, i) + r"\Count") as count:
+                    for j in range(winreg.QueryInfoKey(count)[1]):
+                        name, data, kind = winreg.EnumValue(count, j)
+                        if kind != winreg.REG_BINARY or len(data) < 68:
+                            continue
+                        used = struct.unpack_from("<q", data, 60)[0]
+                        if used:
+                            rows.append((used, name))
+            except OSError:
+                continue
+    rows.sort(key=lambda r: -r[0])
+
+    seen = {a.get("path", "").lower() for a in favs}
     apps = []
-    for row in sorted(rows or [], key=lambda r: -(r["t"] or 0)):
-        if not row["t"]:
-            continue
-        path = codecs.encode(row["n"], "rot13")
+    for _used, name in rows:
+        path = codecs.encode(name, "rot13")
         if path[:1] == "{":
             path = KNOWN_FOLDERS.get(path[:38].upper(), "") + path[38:]
-        if not path.lower().endswith(".exe") or path.lower() in seen:
+        low = path.lower()
+        if not low.endswith(".exe") or low in seen or not os.path.isfile(path):
             continue
-        if not os.path.isfile(path):
-            continue
-        seen.add(path.lower())
+        seen.add(low)
         apps.append({"name": os.path.splitext(os.path.basename(path))[0], "path": path})
         if len(apps) == RECENT_MAX:
             break
@@ -278,37 +371,59 @@ def recents():
 
 def apps_payload():
     global _recents
-    favs, windows = favorites(), list_windows()
-    _recents = recents()
-    icons = icons_for([a.get("path", "") for a in favs]
-                      + [w.get("Path") or "" for w in windows]
-                      + [a["path"] for a in _recents])
-    fav_paths = {a.get("path", "").lower() for a in favs}
-    return {
-        "favorites": [
-            {"name": a["name"], "icon": icons.get(a.get("path", ""))}
-            for a in favs
-        ],
-        "running": [
-            {"pid": w["Id"],
-             "name": w["MainWindowTitle"] or w["ProcessName"],
-             "icon": icons.get(w.get("Path") or ""),
-             "fav": (w.get("Path") or "").lower() in fav_paths}
-            for w in windows
-        ],
-        "recent": [
-            {"name": a["name"], "icon": icons.get(a["path"])}
-            for a in _recents
-        ],
-    }
+    with _payload_lock:
+        favs = favorites()
+        windows = list_windows()
+        recent = _recents = recents(favs)
+        icons = icons_for([a.get("path", "") for a in favs]
+                          + [w["Path"] for w in windows]
+                          + [a["path"] for a in recent])
+        fav_paths = {a.get("path", "").lower() for a in favs}
+        return {
+            "favorites": [
+                {"name": a["name"], "icon": icons.get(a.get("path", ""))}
+                for a in favs
+            ],
+            "running": [
+                {"pid": w["Id"],
+                 "name": w["MainWindowTitle"],
+                 "icon": icons.get(w["Path"]),
+                 "fav": w["Path"].lower() in fav_paths}
+                for w in windows
+            ],
+            "recent": [
+                {"name": a["name"], "icon": icons.get(a["path"])}
+                for a in recent
+            ],
+        }
+
+
+# ponytail: o toque no ALT dribla o foreground lock do Windows. Sem ele o
+# SetForegroundWindow devolve False e a janela abre atras das outras.
+def activate(hwnd):
+    _keybd_event(VK_MENU, 0, 0, 0)
+    _keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
+    _ShowWindow(hwnd, SW_RESTORE)
+    _SetForegroundWindow(hwnd)
 
 
 def focus(pid):
-    ps(PS_FOCUS.replace("{PID}", str(int(pid))))
+    pid = int(pid)
+    for hwnd, owner in main_windows():
+        if owner == pid:
+            activate(hwnd)
+            return
 
 
 def launch(path):
-    ps(PS_LAUNCH.replace("{PATH}", path.replace("'", "''")))
+    before = {hwnd for hwnd, _ in main_windows()}
+    os.startfile(path)
+    for _try in range(20):
+        time.sleep(0.25)
+        for hwnd, _pid in main_windows():
+            if hwnd not in before:
+                activate(hwnd)
+                return
 
 
 def run(req):
@@ -318,7 +433,8 @@ def run(req):
         path = _recents[int(req["recent"])]["path"]
     else:
         path = favorites()[int(req["fav"])]["path"]
-    win = next((w for w in list_windows() if (w.get("Path") or "").lower() == path.lower()), None)
+    low = path.lower()
+    win = next((w for w in list_windows() if w["Path"].lower() == low), None)
     if win:
         focus(win["Id"])
     else:
@@ -339,7 +455,7 @@ def edit_favorites(req):
         win = next((w for w in list_windows() if w["Id"] == pid), None)
         if win is None:
             raise ValueError("processo %d nao esta mais aberto" % pid)
-        if not win.get("Path"):
+        if not win["Path"]:
             raise ValueError("sem caminho do executavel (processo elevado?) - adicione a mao no apps.json")
         if any(a.get("path", "").lower() == win["Path"].lower() for a in favs):
             return
@@ -348,33 +464,70 @@ def edit_favorites(req):
 
 
 class Deck(http.server.BaseHTTPRequestHandler):
+    # HTTP/1.1 mantem a conexao viva: o celular pede o HTML, o JSON e dezenas de
+    # icones sem refazer o handshake TCP a cada um.
+    protocol_version = "HTTP/1.1"
+    disable_nagle_algorithm = True
+
     def do_GET(self):
-        if self.path == "/api/apps":
-            return self._send(json.dumps(apps_payload()).encode(), "application/json")
-        if self.path == "/manifest.json":
-            return self._send(MANIFEST, "application/manifest+json")
-        if self.path == "/icon.png":
-            return self._send(ICON, "image/png")
-        if self.path == "/":
-            with open(os.path.join(BUNDLE_DIR, "index.html"), "rb") as f:
-                return self._send(f.read(), "text/html; charset=utf-8")
+        path = self.path
+        if path == "/api/apps":
+            body = json.dumps(apps_payload(), separators=(",", ":")).encode()
+            return self._send(body, "application/json", NO_STORE)
+        if path.startswith("/i/"):
+            blob = _icon_data.get(path[3:-4])
+            if blob is None:
+                return self.send_error(404)
+            return self._send(blob, "image/png", IMMUTABLE)
+        if path == "/":
+            body, packed, etag = index_asset()
+            return self._send(body, "text/html; charset=utf-8", REVALIDATE, etag, packed)
+        if path == "/manifest.json":
+            return self._send(MANIFEST, "application/manifest+json", REVALIDATE,
+                              MANIFEST_ETAG, MANIFEST_GZ)
+        if path == "/icon.png":
+            return self._send(ICON, "image/png", REVALIDATE, ICON_ETAG)
         self.send_error(404)
 
     def do_POST(self):
-        actions = {"/api/run": run, "/api/fav": edit_favorites}
-        if self.path not in actions:
+        if self.path == "/api/run":
+            action = run
+        elif self.path == "/api/fav":
+            action = edit_favorites
+        else:
             return self.send_error(404)
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
         try:
-            actions[self.path](json.loads(body or b"{}"))
+            action(json.loads(body or b"{}"))
         except Exception as e:
-            return self.send_error(400, str(e).splitlines()[0][:200])
-        self._send(b'{"ok":true}', "application/json")
+            # A linha de status vai como latin-1; texto do Windows pode fugir disso.
+            reason = str(e).splitlines()[0][:200].encode("latin-1", "replace").decode("latin-1")
+            return self.send_error(400, reason)
+        self._send(b'{"ok":true}', "application/json", NO_STORE)
 
-    def _send(self, body, ctype):
+    def _send(self, body, ctype, cache=None, etag=None, packed=None):
+        if etag and self.headers.get("If-None-Match") == etag:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            if cache:
+                self.send_header("Cache-Control", cache)
+            self.end_headers()
+            return
+        encoding = None
+        if "gzip" in (self.headers.get("Accept-Encoding") or ""):
+            if packed is None and len(body) > 900 and not ctype.startswith("image/"):
+                packed = gzip.compress(body, 1)
+            if packed is not None:
+                body, encoding = packed, "gzip"
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        if encoding:
+            self.send_header("Content-Encoding", encoding)
+        if cache:
+            self.send_header("Cache-Control", cache)
+        if etag:
+            self.send_header("ETag", etag)
         self.end_headers()
         self.wfile.write(body)
 
@@ -396,6 +549,17 @@ class DeckServer(http.server.ThreadingHTTPServer):
         with open(os.path.join(DATA_DIR, "error.log"), "a", encoding="utf-8") as log:
             log.write("\n[%s] Erro atendendo %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), client_address[0]))
             traceback.print_exc(file=log)
+
+
+def warm_up():
+    """Extrai os icones em segundo plano: a 1a abertura no celular ja vem pronta."""
+    def work():
+        try:
+            apps_payload()
+        except Exception:
+            pass
+
+    threading.Thread(target=work, name="StreamDeck warmup", daemon=True).start()
 
 
 def lan_ip():
@@ -462,7 +626,6 @@ def deck_is_running():
 
 
 def show_error(message):
-    import ctypes
     ctypes.windll.user32.MessageBoxW(None, message, "StreamDeck de bolso", 0x10)
 
 
@@ -486,6 +649,7 @@ def run_tray():
         daemon=True,
     )
     server_thread.start()
+    warm_up()
 
     def open_local(icon, item):
         webbrowser.open(local_url())
@@ -536,17 +700,27 @@ def run_tray():
 def serve_console():
     address = phone_url()
     print("Deck em  %s   (libere no firewall do Windows na 1a vez)" % address)
+    warm_up()
     DeckServer(("0.0.0.0", PORT), Deck).serve_forever()
+
+
+def foreground_owner():
+    buf = ctypes.create_unicode_buffer(4096)
+    size = wintypes.DWORD()
+    pid = wintypes.DWORD()
+    _GetWindowThreadProcessId(_GetForegroundWindow(), ctypes.byref(pid))
+    return os.path.splitext(os.path.basename(process_path(pid.value, buf, size)))[0]
 
 
 def selfcheck():
     p = apps_payload()
-    assert p["running"], "nenhuma janela encontrada - PS_LIST quebrou"
+    assert p["running"], "nenhuma janela encontrada - EnumWindows quebrou"
     assert all({"pid", "name", "icon", "fav"} <= set(w) for w in p["running"])
     assert all(isinstance(w["pid"], int) for w in p["running"])
-    assert p["recent"], "nenhum app recente - PS_RECENT quebrou"
+    assert p["recent"], "nenhum app recente - UserAssist quebrou"
     assert all({"name", "icon"} <= set(a) for a in p["recent"])
     assert all(os.path.isfile(a["path"]) for a in _recents)
+    assert all(_icon_data[u["icon"][3:-4]] for u in p["recent"] if u["icon"])
 
     probe = os.path.join(tempfile.gettempdir(), "deck-icon-check.png")
     try:
@@ -558,38 +732,42 @@ def selfcheck():
     finally:
         os.path.exists(probe) and os.remove(probe)
 
-    fg = PS_WIN32 + "[Deck]::GetForegroundWindow()"
-    arm = PS_WIN32 + "$h = (Get-Process -Id {PID}).MainWindowHandle" + PS_ACTIVATE + r"""
-Start-Sleep -Milliseconds 400
-[Deck]::keybd_event(0x10, 0, 0, [UIntPtr]::Zero)
-[Deck]::keybd_event(0x10, 0, 2, [UIntPtr]::Zero)
-"""
-    if ps(PS_FGOWNER) == LOCK_SCREEN:
+    # ponytail: arma a trava de foreground - ativa a janela e bate um SHIFT nela.
+    def arm(hwnd):
+        activate(hwnd)
+        time.sleep(0.4)
+        _keybd_event(VK_SHIFT, 0, 0, 0)
+        _keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, 0)
+
+    def main_window(pid):
+        return next((h for h, owner in main_windows() if owner == pid), None)
+
+    if foreground_owner() == LOCK_SCREEN:
         print("aviso: sessao bloqueada, teste da trava de foreground pulado")
     else:
         other = list_windows()[0]
-        other_h = int(ps("(Get-Process -Id %d).MainWindowHandle" % other["Id"]))
+        other_h = main_window(other["Id"])
         invalido = "nao consegui armar a trava de foreground - teste invalido"
 
-        ps(arm.replace("{PID}", str(other["Id"])))
-        assert int(ps(fg)) == other_h, invalido
+        arm(other_h)
+        assert _GetForegroundWindow() == other_h, invalido
         launch("notepad.exe")
-        pid = int(ps("(Get-Process notepad | Sort-Object StartTime | Select-Object -Last 1).Id"))
-        handle = int(ps("(Get-Process -Id %d).MainWindowHandle" % pid))
+        pad = next(w for w in list_windows() if os.path.basename(w["Path"]).lower() == "notepad.exe")
+        handle = main_window(pad["Id"])
         try:
             time.sleep(0.6)
-            assert int(ps(fg)) == handle, "app recem-lancado ficou atras (trava de foreground)"
-            ps(arm.replace("{PID}", str(other["Id"])))
-            assert int(ps(fg)) == other_h, invalido
-            focus(pid)
+            assert _GetForegroundWindow() == handle, "app recem-lancado ficou atras (trava de foreground)"
+            arm(other_h)
+            assert _GetForegroundWindow() == other_h, invalido
+            focus(pad["Id"])
             time.sleep(0.6)
-            assert int(ps(fg)) == handle, "janela existente ficou atras (trava de foreground)"
+            assert _GetForegroundWindow() == handle, "janela existente ficou atras (trava de foreground)"
         finally:
-            ps("Stop-Process -Id %d -Force" % pid)
+            ps("Stop-Process -Id %d -Force" % pad["Id"])
 
     print("ok: %d abertos, %d favoritos, %d recentes, %d icones, manifest %d bytes, icon %d bytes"
           % (len(p["running"]), len(p["favorites"]), len(p["recent"]),
-             sum(1 for v in _icon_cache.values() if v), len(MANIFEST), len(ICON)))
+             len(_icon_data), len(MANIFEST), len(ICON)))
 
 
 if __name__ == "__main__":

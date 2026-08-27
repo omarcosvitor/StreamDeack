@@ -1,7 +1,8 @@
 name: Instalador
 
-# Gera o instalador do Windows a cada push na main. O .exe fica anexado a
-# execucao, em Actions -> a execucao -> Artifacts.
+# Gera o instalador do Windows a cada push na main e publica na release
+# "latest", que sempre aponta pro ultimo commit:
+# https://github.com/omarcosvitor/StreamDeack/releases/latest
 on:
   push:
     branches: [main]
@@ -13,7 +14,7 @@ on:
         default: "1.1.0"
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: instalador-${{ github.ref }}
@@ -62,14 +63,31 @@ jobs:
           Write-Host ("{0} - {1:N1} MB" -f $exe.Name, ($exe.Length / 1MB))
           if ($exe.Length -lt 1MB) { throw 'Instalador menor que o esperado.' }
 
-      # O instalador tem ~12 MB por execucao. Guardar 90 dias estoura a cota de
-      # armazenamento da conta; duas semanas cobrem de sobra o uso real.
-      - uses: actions/upload-artifact@v4
-        with:
-          name: StreamDeck-Setup-${{ env.VERSION }}
-          path: release/StreamDeck-Setup-*.exe
-          if-no-files-found: error
-          retention-days: 14
-          # O .exe ja sai comprimido em lzma2 pelo Inno Setup; zipar de novo
-          # so gastaria CPU sem reduzir o que ocupa na cota.
-          compression-level: 0
+      # Publica como release em vez de artefato: o .exe ganha link fixo e nao
+      # consome a cota de armazenamento de artefatos do Actions, pequena demais
+      # pra um instalador de ~12 MB por push.
+      - name: Publicar o instalador
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
+
+          $exe = "release\StreamDeck-Setup-$env:VERSION.exe"
+          $notas = @(
+            "Instalador gerado a partir do commit $($env:GITHUB_SHA.Substring(0, 7)) na main.",
+            "",
+            "Baixe o **StreamDeck-Setup-$env:VERSION.exe** aqui embaixo e execute.",
+            "Nao precisa de Python nem de permissao de administrador.",
+            "",
+            "Os favoritos ficam em %LOCALAPPDATA%\StreamDeck\apps.json e sobrevivem a atualizacao."
+          ) -join "`n"
+
+          # Release rolante: apaga a anterior pra tag apontar pro commit novo.
+          # Na primeira execucao ainda nao existe nada, e falhar aqui e esperado.
+          gh release delete latest --yes --cleanup-tag
+
+          gh release create latest $exe --target $env:GITHUB_SHA --title "StreamDeck $env:VERSION" --notes $notas
+          if ($LASTEXITCODE -ne 0) { throw "Nao foi possivel publicar a release (codigo $LASTEXITCODE)." }
+
+          Write-Host "Publicado em https://github.com/$env:GITHUB_REPOSITORY/releases/latest"

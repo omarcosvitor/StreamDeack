@@ -62,9 +62,14 @@ jobs:
           Write-Host ("{0} - {1:N1} MB" -f $exe.Name, ($exe.Length / 1MB))
           if ($exe.Length -lt 1MB) { throw 'Instalador menor que o esperado.' }
 
+      # O instalador tem ~12 MB por execucao. Guardar 90 dias estoura a cota de
+      # armazenamento da conta; duas semanas cobrem de sobra o uso real.
       - uses: actions/upload-artifact@v4
         with:
           name: StreamDeck-Setup-${{ env.VERSION }}
           path: release/StreamDeck-Setup-*.exe
           if-no-files-found: error
-          retention-days: 90
+          retention-days: 14
+          # O .exe ja sai comprimido em lzma2 pelo Inno Setup; zipar de novo
+          # so gastaria CPU sem reduzir o que ocupa na cota.
+          compression-level: 0

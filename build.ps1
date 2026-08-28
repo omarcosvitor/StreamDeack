@@ -41,6 +41,7 @@ try {
         --windowed `
         --icon $IconPath `
         --add-data 'index.html;.' `
+        --exclude-module decklinux `
         --distpath $DistDir `
         --workpath $BuildDir `
         deck.py

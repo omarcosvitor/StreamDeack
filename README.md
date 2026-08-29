@@ -35,6 +35,43 @@ favorito é o caminho de um arquivo `.desktop`, de uma pasta ou uma URL. O paine
 de baixo lista os aplicativos instalados (o Linux não tem o equivalente da lista
 de mais usados do Windows) — toque longo promove qualquer um a favorito.
 
+## Atalhos de teclado
+
+Um favorito pode ser um atalho em vez de um aplicativo: o toque manda as teclas
+para a janela que estiver em foco no PC (mutar a chamada, pausar o vídeo, `Alt+F4`).
+
+Na página de favoritos, a tecla `+` no fim da lista abre o formulário: marca os
+modificadores, escreve o nome da tecla e salva. Toque longo remove, igual a
+qualquer favorito.
+
+Dá para escrever direto no `apps.json` também — em vez de `path`, use `keys`:
+
+```json
+[
+  { "name": "Mutar microfone", "keys": "ctrl+shift+m" },
+  { "name": "Volume +",        "keys": "volumeup" },
+  { "name": "Fechar",          "keys": "alt+f4" }
+]
+```
+
+Modificadores: `ctrl`, `shift`, `alt`, `win`. Teclas: `a`-`z`, `0`-`9`, `f1`-`f24`,
+`enter`, `esc`, `tab`, `space`, `backspace`, `delete`, `insert`, `home`, `end`,
+`pageup`, `pagedown`, `up`, `down`, `left`, `right`, `printscreen`, `menu`,
+`capslock`, `volumeup`, `volumedown`, `mute`, `playpause`, `next`, `prev`, `stop`
+e a pontuação (`comma`, `period`, `slash`, `backslash`, `semicolon`, `apostrophe`,
+`grave`, `bracketleft`, `bracketright`, `minus`, `equal`). Os nomes valem nos dois
+sistemas — o mesmo `apps.json` roda no Windows e no Linux.
+
+No Windows funciona sem instalar nada. No Linux o KWin não injeta tecla, então
+precisa de uma destas (o deck usa a primeira que encontrar, na ordem certa para a
+sessão):
+
+```bash
+sudo dnf install ydotool && systemctl --user enable --now ydotool   # Wayland, alcança tudo
+sudo dnf install wtype                                             # Wayland, teclado virtual do compositor
+sudo dnf install xdotool                                           # X11 (no Wayland só alcança apps XWayland)
+```
+
 ## Desenvolvimento
 
 ```

@@ -26,6 +26,7 @@ GW_OWNER = 4
 SW_MAXIMIZE = 3
 VK_MENU = 0x12
 VK_SHIFT = 0x10
+KEYEVENTF_EXTENDEDKEY = 1
 KEYEVENTF_KEYUP = 2
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
@@ -122,6 +123,30 @@ KNOWN_FOLDERS = {
     "{F38BF404-1D43-42F2-9305-67DE0B28FC23}": os.environ.get("windir", ""),
     "{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}": os.path.join(os.environ.get("USERPROFILE", ""), "Desktop"),
 }
+
+# Atalhos de teclado ---------------------------------------------------------
+# Nomes canonicos (deck.py) -> virtual-key do Win32. As de bloco de edicao,
+# setas e midia sao "estendidas": sem a flag o Windows entrega a versao do
+# teclado numerico e o atalho nao casa.
+MOD_VK = {"ctrl": 0x11, "shift": 0x10, "alt": 0x12, "win": 0x5B}
+VK = {
+    "enter": 0x0D, "esc": 0x1B, "tab": 0x09, "space": 0x20, "backspace": 0x08,
+    "delete": 0x2E, "insert": 0x2D, "home": 0x24, "end": 0x23,
+    "pageup": 0x21, "pagedown": 0x22,
+    "up": 0x26, "down": 0x28, "left": 0x25, "right": 0x27,
+    "printscreen": 0x2C, "menu": 0x5D, "capslock": 0x14,
+    "volumeup": 0xAF, "volumedown": 0xAE, "mute": 0xAD,
+    "playpause": 0xB3, "next": 0xB0, "prev": 0xB1, "stop": 0xB2,
+    "semicolon": 0xBA, "equal": 0xBB, "comma": 0xBC, "minus": 0xBD,
+    "period": 0xBE, "slash": 0xBF, "grave": 0xC0,
+    "bracketleft": 0xDB, "backslash": 0xDC, "bracketright": 0xDD, "apostrophe": 0xDE,
+}
+VK.update({c: ord(c.upper()) for c in "abcdefghijklmnopqrstuvwxyz0123456789"})
+VK.update({"f%d" % n: 0x70 + n - 1 for n in range(1, 25)})
+EXTENDED = frozenset((
+    "insert delete home end pageup pagedown up down left right printscreen menu "
+    "volumeup volumedown mute playpause next prev stop win").split())
+KEYS = frozenset(VK)
 
 
 def ps(script):
@@ -274,6 +299,19 @@ def launch(path):
             if hwnd not in before:
                 activate(hwnd)
                 return
+
+
+# ponytail: keybd_event e legado, mas e o mesmo caminho que a ativacao de janela
+# ja usa aqui e chega em qualquer app. Segura os modificadores, bate a tecla e
+# solta na ordem inversa - solto ao contrario, o app veria o Ctrl preso.
+def send_keys(mods, key):
+    codes = [(MOD_VK[m], m in EXTENDED) for m in mods] + [(VK[key], key in EXTENDED)]
+    for code, extended in codes:
+        _keybd_event(code, 0, KEYEVENTF_EXTENDEDKEY if extended else 0, 0)
+        time.sleep(0.01)
+    for code, extended in reversed(codes):
+        flags = KEYEVENTF_KEYUP | (KEYEVENTF_EXTENDEDKEY if extended else 0)
+        _keybd_event(code, 0, flags, 0)
 
 
 def copy_text(text):

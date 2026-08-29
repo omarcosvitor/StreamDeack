@@ -3,12 +3,14 @@
 Janelas (listar, focar) passam por um script KWin carregado via D-Bus - no
 Wayland nao existe API generica pra isso, cada compositor tem a sua. Apps e
 icones vem do padrao freedesktop (.desktop + tema de icones), esses valem em
-qualquer distro.
+qualquer distro. Atalhos de teclado saem por ydotool, wtype ou xdotool - o
+KWin nao injeta tecla, entao aqui depende de uma ferramenta externa.
 """
 import configparser
 import glob
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -179,6 +181,100 @@ def icon_bytes(paths):
     return out
 
 
+# teclado --------------------------------------------------------------------
+# Nomes canonicos (deck.py) -> keysym do X11 (xdotool e wtype usam os mesmos) e
+# codigo do evdev (ydotool fala direto com o kernel, em numero).
+MOD_X11 = {"ctrl": "ctrl", "shift": "shift", "alt": "alt", "win": "super"}
+MOD_WTYPE = {"ctrl": "ctrl", "shift": "shift", "alt": "alt", "win": "logo"}
+MOD_EVDEV = {"ctrl": 29, "shift": 42, "alt": 56, "win": 125}
+
+KEY_X11 = {
+    "enter": "Return", "esc": "Escape", "tab": "Tab", "space": "space",
+    "backspace": "BackSpace", "delete": "Delete", "insert": "Insert",
+    "home": "Home", "end": "End", "pageup": "Page_Up", "pagedown": "Page_Down",
+    "up": "Up", "down": "Down", "left": "Left", "right": "Right",
+    "printscreen": "Print", "menu": "Menu", "capslock": "Caps_Lock",
+    "volumeup": "XF86AudioRaiseVolume", "volumedown": "XF86AudioLowerVolume",
+    "mute": "XF86AudioMute", "playpause": "XF86AudioPlay",
+    "next": "XF86AudioNext", "prev": "XF86AudioPrev", "stop": "XF86AudioStop",
+}
+KEY_X11.update({c: c for c in "abcdefghijklmnopqrstuvwxyz0123456789"})
+KEY_X11.update({"f%d" % n: "F%d" % n for n in range(1, 25)})
+KEY_X11.update({name: name for name in ("comma period slash backslash semicolon "
+                                        "apostrophe grave bracketleft bracketright "
+                                        "minus equal").split()})
+
+KEY_EVDEV = {
+    "esc": 1, "minus": 12, "equal": 13, "backspace": 14, "tab": 15,
+    "bracketleft": 26, "bracketright": 27, "enter": 28,
+    "semicolon": 39, "apostrophe": 40, "grave": 41, "backslash": 43,
+    "comma": 51, "period": 52, "slash": 53, "space": 57, "capslock": 58,
+    "printscreen": 99, "home": 102, "up": 103, "pageup": 104, "left": 105,
+    "right": 106, "end": 107, "down": 108, "pagedown": 109, "insert": 110,
+    "delete": 111, "mute": 113, "volumedown": 114, "volumeup": 115,
+    "menu": 127, "next": 163, "playpause": 164, "prev": 165, "stop": 166,
+}
+KEY_EVDEV.update(dict(zip("1234567890", range(2, 12))))
+KEY_EVDEV.update(dict(zip("qwertyuiop", range(16, 26))))
+KEY_EVDEV.update(dict(zip("asdfghjkl", range(30, 39))))
+KEY_EVDEV.update(dict(zip("zxcvbnm", range(44, 51))))
+KEY_EVDEV.update({"f%d" % n: 58 + n for n in range(1, 11)})       # F1..F10
+KEY_EVDEV.update({"f11": 87, "f12": 88})
+KEY_EVDEV.update({"f%d" % n: 170 + n for n in range(13, 25)})     # F13..F24
+
+KEYS = frozenset(KEY_X11) & frozenset(KEY_EVDEV)
+NO_TOOL = ("nenhuma ferramenta de teclado instalada - instale ydotool "
+           "(sudo dnf install ydotool && systemctl --user enable --now ydotool), "
+           "wtype ou xdotool")
+
+
+def _xdotool(mods, key):
+    return ["xdotool", "key", "--clearmodifiers",
+            "+".join([MOD_X11[m] for m in mods] + [KEY_X11[key]])]
+
+
+def _wtype(mods, key):
+    cmd = ["wtype"]
+    for mod in mods:
+        cmd += ["-M", MOD_WTYPE[mod]]
+    cmd += ["-k", KEY_X11[key]]
+    for mod in mods:
+        cmd += ["-m", MOD_WTYPE[mod]]
+    return cmd
+
+
+def _ydotool(mods, key):
+    codes = [MOD_EVDEV[m] for m in mods] + [KEY_EVDEV[key]]
+    # Aperta na ordem e solta ao contrario: o modificador sai depois da tecla.
+    return (["ydotool", "key", "--key-delay=12"]
+            + ["%d:1" % c for c in codes]
+            + ["%d:0" % c for c in reversed(codes)])
+
+
+def keyboard_tools():
+    """Ferramentas na ordem de preferencia da sessao atual.
+
+    No X11 o xdotool e o caminho curto. No Wayland ele so alcanca apps XWayland,
+    entao vem por ultimo: o ydotool injeta pelo uinput (chega em tudo) e o wtype
+    usa o teclado virtual do proprio compositor.
+    """
+    if os.environ.get("XDG_SESSION_TYPE") == "x11":
+        return (("xdotool", _xdotool), ("ydotool", _ydotool), ("wtype", _wtype))
+    return (("ydotool", _ydotool), ("wtype", _wtype), ("xdotool", _xdotool))
+
+
+def send_keys(mods, key):
+    for name, build in keyboard_tools():
+        if not shutil.which(name):
+            continue
+        done = subprocess.run(build(mods, key), capture_output=True,
+                              encoding="utf-8", errors="replace", timeout=10)
+        if done.returncode == 0:
+            return
+        raise RuntimeError("%s falhou: %s" % (name, done.stderr.strip() or done.returncode))
+    raise RuntimeError(NO_TOOL)
+
+
 # contrato do deck.py --------------------------------------------------------
 
 LIST_JS = """
@@ -266,5 +362,8 @@ def selfcheck():
     assert windows, "nenhuma janela aberta - o script KWin nao listou nada"
     assert kwin(FOCUS_JS % json.dumps(windows[0]["id"])) == 1, "focar a janela falhou"
     assert icon_index(), "nenhum icone encontrado no tema"
-    print("ok: KWin responde, %d icones indexados, tema %r"
-          % (len(icon_index()), _read_theme() or "(padrao)"))
+    tool = next((n for n, _b in keyboard_tools() if shutil.which(n)), None)
+    print("ok: KWin responde, %d icones indexados, tema %r, teclado por %s"
+          % (len(icon_index()), _read_theme() or "(padrao)", tool or "(nada instalado)"))
+    if not tool:
+        print("aviso: atalhos de teclado indisponiveis - " + NO_TOOL)

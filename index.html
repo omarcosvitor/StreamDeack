@@ -51,6 +51,9 @@
   .key img, .key .ph { flex:none; display:block; margin-bottom:15px; }
   .key .ph { border-radius:11px; background:#e2e8ee; color:#33485c;
              font-weight:600; display:flex; align-items:center; justify-content:center; }
+  /* Tecla de atalho: sem icone pra mostrar, o proprio combo vira a arte. */
+  .key .ph.hk { flex-direction:column; line-height:1.15; background:#f6ece1; color:#8a4d12; }
+  .key .ph.hk i { font-style:normal; font-weight:700; letter-spacing:.06em; opacity:.72; }
   .key span { position:absolute; left:0; right:0; bottom:8px; padding:0 8px; text-align:center;
               text-transform:uppercase; letter-spacing:.07em; color:#526170;
               white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -69,6 +72,29 @@
            opacity:0; pointer-events:none; transition:opacity .22s ease; }
   #toast.on { opacity:1; }
 
+  #sheet { position:fixed; left:0; top:0; right:0; bottom:0; z-index:9;
+           display:flex; align-items:center; justify-content:center; padding:14px;
+           background:rgba(23,33,44,.42); }
+  #sheet[hidden] { display:none; }
+  #sheet form { width:100%; max-width:380px; max-height:100%; overflow-y:auto;
+                padding:16px; border-radius:18px; background:#fff;
+                box-shadow:0 18px 44px rgba(40,55,70,.32); }
+  #sheet h2 { margin:0 0 12px; font-size:15px; letter-spacing:.02em; }
+  #sheet label { display:block; margin-bottom:10px; font-size:11px;
+                 text-transform:uppercase; letter-spacing:.08em; color:#68788a; }
+  #sheet input { display:block; width:100%; margin-top:5px; padding:9px 11px;
+                 border:1px solid #d3dbe3; border-radius:11px; background:#f7f9fb;
+                 color:#17212c; font:14px inherit; user-select:text; -webkit-user-select:text; }
+  #sheet input:focus { outline:2px solid #e8933a; outline-offset:0; border-color:#e8933a; }
+  #mods { display:flex; flex-wrap:wrap; gap:7px; margin:5px 0 12px; }
+  #sheet button { padding:9px 14px; border:1px solid #d3dbe3; border-radius:11px;
+                  background:#f7f9fb; color:#33485c; font:600 13px inherit; }
+  #mods button.on { border-color:#e8933a; background:#fbeedd; color:#8a4d12; }
+  #acts { display:flex; gap:8px; justify-content:flex-end; margin-top:4px; }
+  #acts button.go { border-color:#c96d1d; background:#e8933a; color:#fff; }
+  #hint { margin:0 0 12px; font-size:11px; color:#7d8b99; line-height:1.45; }
+  #sheet button.busy { opacity:.52; }
+
   @media (prefers-reduced-motion: reduce) { .key, .key .glow, #dots, #toast { transition:none; } }
 </style>
 <div id="stage">
@@ -77,6 +103,30 @@
   <section class="row"><div class="page" id="p-recent"></div></section>
 </div>
 <div id="dots"><i class="on"></i><i></i></div>
+<div id="sheet" hidden>
+  <form id="hk">
+    <h2>Novo atalho de teclado</h2>
+    <p id="hint">O toque manda essas teclas pra janela que estiver em foco no PC.</p>
+    <div id="mods">
+      <button type="button" data-mod="ctrl">Ctrl</button>
+      <button type="button" data-mod="shift">Shift</button>
+      <button type="button" data-mod="alt">Alt</button>
+      <button type="button" data-mod="win">Win</button>
+    </div>
+    <label>Tecla
+      <input id="hk-key" list="hk-keys" autocomplete="off" autocapitalize="off"
+             autocorrect="off" spellcheck="false" placeholder="m, f5, enter, mute" required>
+    </label>
+    <datalist id="hk-keys"></datalist>
+    <label>Nome (opcional)
+      <input id="hk-name" autocomplete="off" placeholder="Mutar microfone">
+    </label>
+    <div id="acts">
+      <button type="button" id="hk-no">Cancelar</button>
+      <button type="submit" class="go">Salvar</button>
+    </div>
+  </form>
+</div>
 <div id="toast"></div>
 <script>
 var data = { favorites: [], running: [], recent: [] };
@@ -166,8 +216,8 @@ function sample(img) {
   return [104, 124, 148];
 }
 
-function paint(key, glow, img) {
-  var c = [104, 124, 148];
+function paint(key, glow, img, fixed) {
+  var c = fixed || [104, 124, 148];
   if (img) c = tints[img.src] || (tints[img.src] = sample(img));
   var skin = skins[c];
   if (!skin) {
@@ -244,16 +294,54 @@ stage.addEventListener('click', function (e) {
 });
 
 function tap(k) {
+  if (k.kind === 'new') return openSheet();
   if (k.kind === 'open') return post('/api/run', { pid: k.idx }, k);
   if (k.kind === 'recent') return post('/api/run', { recent: k.idx }, k);
   post('/api/run', { fav: k.idx }, k);
 }
 
 function hold(k) {
+  if (k.kind === 'new') return openSheet();
   if (k.kind === 'fav') return post('/api/fav', { remove: k.idx }, k).then(load);
   if (k.kind === 'recent') return post('/api/fav', { add_recent: k.idx }, k).then(load);
   if (k.isFav) return toast(k.label + ' ja esta nos favoritos');
   post('/api/fav', { add: k.idx }, k).then(load);
+}
+
+// Teclas de atalho nao tem icone: a arte e o proprio combo, modificadores
+// abreviados em cima e a tecla final em destaque. Sem keys, desenha o "+".
+var GLYPH = { volumeup: 'VOL+', volumedown: 'VOL-', mute: 'MUDO', playpause: '\u25B6\u2016',
+              next: '\u23ED', prev: '\u23EE', stop: '\u23F9', enter: '\u23CE',
+              space: '\u2423', backspace: '\u232B', up: '\u2191', down: '\u2193',
+              left: '\u2190', right: '\u2192', pageup: 'PG+', pagedown: 'PG-',
+              printscreen: 'PRT', capslock: 'CAPS', semicolon: ';', apostrophe: "'",
+              grave: '`', comma: ',', period: '.', slash: '/', backslash: '\\',
+              bracketleft: '[', bracketright: ']', minus: '-', equal: '=' };
+var SHORT = { ctrl: 'CTRL', shift: 'SHF', alt: 'ALT', win: 'WIN' };
+var ACCENT = [232, 147, 58];
+
+function combo(keys, as) {
+  var art = document.createElement('div');
+  art.className = keys ? 'ph hk' : 'ph';
+  art.style.cssText = 'width:' + as + 'px;height:' + as + 'px';
+  if (!keys) {
+    art.textContent = '+';
+    art.style.fontSize = Math.round(as * 0.6) + 'px';
+    return art;
+  }
+  var parts = keys.split('+');
+  var main = parts.pop();
+  if (parts.length) {
+    var mods = document.createElement('i');
+    mods.textContent = parts.map(function (m) { return SHORT[m] || m.toUpperCase(); }).join('+');
+    mods.style.fontSize = Math.max(6, Math.round(as * (parts.length > 1 ? 0.15 : 0.19))) + 'px';
+    art.appendChild(mods);
+  }
+  var big = document.createElement('b');
+  big.textContent = GLYPH[main] || main.toUpperCase();
+  big.style.fontSize = Math.round(as * (big.textContent.length > 2 ? 0.26 : 0.42)) + 'px';
+  art.appendChild(big);
+  return art;
 }
 
 function buildKey(item, size, kind, idx) {
@@ -268,6 +356,9 @@ function buildKey(item, size, kind, idx) {
     art.style.cssText = 'width:' + as + 'px;height:' + as + 'px';
     art.onload = function () { paint(b, glow, art); };
     art.src = item.icon;
+  } else if (item.keys || item.plus) {
+    art = combo(item.keys, as);
+    paint(b, glow, null, item.keys ? ACCENT : null);
   } else {
     art = document.createElement('div');
     art.className = 'ph';
@@ -299,6 +390,21 @@ function fill(page, items, size, kind, from, count) {
   page.appendChild(frag);
 }
 
+// A tecla "+" ocupa a vaga seguinte ao ultimo favorito. Se os favoritos lotarem
+// as duas paginas ela toma a vaga final da segunda - some um favorito, mas do
+// celular continua dando pra criar atalho.
+function fillFav(page, from, count, last) {
+  var favs = data.favorites;
+  var frag = document.createDocumentFragment();
+  var room = (last && favs.length >= from + count) ? count - 1 : count;
+  var end = Math.min(favs.length, from + room);
+  for (var i = from; i < end; i++) frag.appendChild(buildKey(favs[i], grid.size, 'fav', i));
+  if (favs.length >= from && (favs.length < from + count || last))
+    frag.appendChild(buildKey({ name: 'novo atalho', plus: true }, grid.size, 'new', -1));
+  page.textContent = '';
+  page.appendChild(frag);
+}
+
 // ponytail: escolhe a coluna que deixa a tecla maior, nunca maior que a dos favoritos.
 function autoSize(n) {
   var best = 0;
@@ -319,9 +425,10 @@ function render() {
            size: Math.max(52, Math.min(140, Math.floor(Math.min(w / cols, h / rows)) - gap)) };
 
   var per = cols * rows;
-  fill(P.fav0, data.favorites, grid.size, 'fav', 0, per);
-  fill(P.fav1, data.favorites, grid.size, 'fav', per, per);
-  var second = data.favorites.length > per ? '' : 'none';
+  fillFav(P.fav0, 0, per, false);
+  fillFav(P.fav1, per, per, true);
+  // +1: a ultima vaga e sempre a tecla de criar atalho.
+  var second = data.favorites.length + 1 > per ? '' : 'none';
   if (P.fav1.style.display !== second) P.fav1.style.display = second;
 
   fill(P.open, data.running, autoSize(data.running.length || 1), 'open', 0, data.running.length);
@@ -351,6 +458,75 @@ function load() {
     render();
   }, function () { toast('sem conexao com o PC'); });
 }
+
+// Novo atalho ---------------------------------------------------------------
+// O celular nao tem Ctrl nem Shift pra capturar de verdade, entao o combo se
+// monta no dedo: chips pros modificadores e o nome da tecla final digitado.
+var KEY_LIST = ('a b c d e f g h i j k l m n o p q r s t u v w x y z ' +
+                '0 1 2 3 4 5 6 7 8 9 f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12 ' +
+                'enter esc tab space backspace delete insert home end pageup pagedown ' +
+                'up down left right printscreen menu capslock ' +
+                'volumeup volumedown mute playpause next prev stop ' +
+                'comma period slash backslash semicolon apostrophe grave ' +
+                'bracketleft bracketright minus equal').split(' ');
+var sheet = document.getElementById('sheet');
+var form = document.getElementById('hk');
+var keyIn = document.getElementById('hk-key');
+var nameIn = document.getElementById('hk-name');
+var modsEl = document.getElementById('mods');
+var saveBtn = form.querySelector('.go');
+
+(function () {
+  var list = document.getElementById('hk-keys');
+  var frag = document.createDocumentFragment();
+  for (var i = 0; i < KEY_LIST.length; i++) {
+    var o = document.createElement('option');
+    o.value = KEY_LIST[i];
+    frag.appendChild(o);
+  }
+  list.appendChild(frag);
+})();
+
+function openSheet() {
+  keyIn.value = '';
+  nameIn.value = '';
+  var chips = modsEl.children;
+  for (var i = 0; i < chips.length; i++) chips[i].className = '';
+  sheet.hidden = false;
+  keyIn.focus();
+}
+
+function closeSheet() { sheet.hidden = true; }
+
+modsEl.addEventListener('click', function (e) {
+  var chip = e.target.closest ? e.target.closest('button') : null;
+  if (!chip) return;
+  chip.className = chip.className ? '' : 'on';
+  vibe(10);
+});
+
+document.getElementById('hk-no').addEventListener('click', closeSheet);
+sheet.addEventListener('click', function (e) { if (e.target === sheet) closeSheet(); });
+document.addEventListener('keydown', function (e) {
+  if (e.key === 'Escape' && !sheet.hidden) closeSheet();
+});
+
+form.addEventListener('submit', function (e) {
+  e.preventDefault();
+  var key = keyIn.value.trim();
+  if (!key) return toast('escolha a tecla');
+  var parts = [];
+  var chips = modsEl.children;
+  for (var i = 0; i < chips.length; i++)
+    if (chips[i].className) parts.push(chips[i].dataset.mod);
+  parts.push(key);
+  post('/api/fav', { hotkey: parts.join('+'), name: nameIn.value }, saveBtn)
+    .then(function (ok) {
+      if (!ok) return;
+      closeSheet();
+      load();
+    });
+});
 
 stage.addEventListener('scroll', dots, { passive: true });
 rowFav.addEventListener('scroll', dots, { passive: true });

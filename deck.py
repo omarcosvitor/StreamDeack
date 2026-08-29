@@ -13,7 +13,8 @@ abertos, pra baixo os usados recentemente. Toque abre, toque longo adiciona ou
 remove dos favoritos.
 
 Favoritos ficam em apps.json (name + path). No Windows path aceita .exe, .lnk,
-pasta ou URL; no Linux, um .desktop, pasta ou URL.
+pasta ou URL; no Linux, um .desktop, pasta ou URL. Em vez de path, um favorito
+pode ter keys ("ctrl+shift+m"): o toque manda esse atalho pro teclado do PC.
 Porta: variavel de ambiente DECK_PORT (padrao 8765).
 """
 import gzip
@@ -51,6 +52,55 @@ else:
                                            os.path.expanduser("~/.config")), "StreamDeck")
 FAVS = os.path.join(DATA_DIR, "apps.json")
 PORT = int(os.environ.get("DECK_PORT", 8765))
+
+# Atalhos de teclado ---------------------------------------------------------
+# O vocabulario de teclas mora aqui, nao no backend: os dois sistemas aceitam os
+# mesmos nomes e cada backend so traduz pro codigo dele. Assim um apps.json
+# escrito no Windows continua valendo no Linux.
+MODIFIERS = ("ctrl", "shift", "alt", "win")
+MOD_ALIASES = {"control": "ctrl", "ctl": "ctrl", "super": "win", "meta": "win",
+               "cmd": "win", "command": "win", "windows": "win", "logo": "win",
+               "option": "alt"}
+KEY_ALIASES = {"return": "enter", "escape": "esc", "del": "delete", "ins": "insert",
+               "pgup": "pageup", "pgdn": "pagedown", "prtsc": "printscreen",
+               "print": "printscreen", "spacebar": "space", "volup": "volumeup",
+               "voldown": "volumedown", "volumemute": "mute", "play": "playpause",
+               "pause": "playpause", "nexttrack": "next", "prevtrack": "prev",
+               "previous": "prev", "quote": "apostrophe", "dot": "period"}
+NAMED_KEYS = ("enter esc tab space backspace delete insert home end pageup pagedown "
+              "up down left right printscreen menu capslock "
+              "volumeup volumedown mute playpause next prev stop "
+              "comma period slash backslash semicolon apostrophe grave "
+              "bracketleft bracketright minus equal").split()
+KEY_NAMES = (set(NAMED_KEYS) | set("abcdefghijklmnopqrstuvwxyz0123456789")
+             | {"f%d" % n for n in range(1, 25)})
+
+
+def parse_hotkey(combo):
+    """"Ctrl+Shift+M" -> (["ctrl", "shift"], "m"). Levanta ValueError se nao existir."""
+    parts = [p.strip().lower() for p in str(combo).split("+") if p.strip()]
+    if not parts:
+        raise ValueError("atalho vazio")
+    if len(parts) > 5:
+        raise ValueError("atalho com modificadores demais")
+    key = KEY_ALIASES.get(parts[-1], parts[-1])
+    if key not in KEY_NAMES:
+        raise ValueError("tecla desconhecida: %s" % parts[-1])
+    mods = []
+    for raw in parts[:-1]:
+        mod = MOD_ALIASES.get(raw, raw)
+        if mod not in MODIFIERS:
+            raise ValueError("modificador desconhecido: %s" % raw)
+        if mod not in mods:
+            mods.append(mod)
+    # Ordem canonica: dois atalhos iguais viram a mesma string e nao duplicam.
+    mods.sort(key=MODIFIERS.index)
+    return mods, key
+
+
+def hotkey_text(combo):
+    mods, key = parse_hotkey(combo)
+    return "+".join(mods + [key])
 
 
 def png_square(size, rgb):
@@ -154,6 +204,14 @@ def same(a, b):
     return a.lower() == b.lower()
 
 
+def fav_item(app, icons):
+    """Favorito como o celular ve: so leva keys quando for atalho de teclado."""
+    item = {"name": app["name"], "icon": icons.get(app.get("path", ""))}
+    if app.get("keys"):
+        item["keys"] = app["keys"]
+    return item
+
+
 def apps_payload():
     global _recents
     with _payload_lock:
@@ -165,10 +223,7 @@ def apps_payload():
                           + [a["path"] for a in recent])
         fav_paths = {a.get("path", "").lower() for a in favs}
         return {
-            "favorites": [
-                {"name": a["name"], "icon": icons.get(a.get("path", ""))}
-                for a in favs
-            ],
+            "favorites": [fav_item(a, icons) for a in favs],
             "running": [
                 {"pid": w["id"],
                  "name": w["title"],
@@ -189,7 +244,13 @@ def run(req):
     if "recent" in req:
         path = _recents[int(req["recent"])]["path"]
     else:
-        path = favorites()[int(req["fav"])]["path"]
+        fav = favorites()[int(req["fav"])]
+        if fav.get("keys"):
+            # O atalho vai pra janela que estiver em foco no PC - nao abre nada.
+            return backend.send_keys(*parse_hotkey(fav["keys"]))
+        path = fav.get("path", "")
+        if not path:
+            raise ValueError("favorito sem path nem keys no apps.json")
     win = next((w for w in backend.list_windows() if w["path"] and same(w["path"], path)), None)
     if win:
         backend.focus(win["id"])
@@ -201,6 +262,12 @@ def edit_favorites(req):
     favs = favorites()
     if "remove" in req:
         favs.pop(int(req["remove"]))
+    elif "hotkey" in req:
+        combo = hotkey_text(req["hotkey"])
+        if any(a.get("keys", "").lower() == combo for a in favs):
+            return
+        favs.append({"name": (req.get("name") or "").strip() or combo.upper(),
+                     "keys": combo})
     elif "add_recent" in req:
         app = _recents[int(req["add_recent"])]
         if any(same(a.get("path", ""), app["path"]) for a in favs):
@@ -473,6 +540,18 @@ def selfcheck():
     assert all(os.path.exists(a["path"]) for a in _recents)
     assert all(_icon_data[u["icon"][3:]] for u in p["recent"] if u["icon"])
     assert any(u["icon"] for u in p["recent"]), "nenhum icone extraido"
+
+    assert KEY_NAMES <= backend.KEYS, ("teclas sem traducao no backend: %s"
+                                      % sorted(KEY_NAMES - backend.KEYS))
+    assert parse_hotkey("Ctrl+Shift+M") == (["ctrl", "shift"], "m")
+    assert parse_hotkey(" super + f5 ") == (["win"], "f5")
+    assert hotkey_text("shift+ctrl+volup") == "ctrl+shift+volumeup"
+    for bad in ("", "ctrl+", "hyper+a", "ctrl+banana"):
+        try:
+            parse_hotkey(bad)
+        except ValueError:
+            continue
+        raise AssertionError("parse_hotkey aceitou %r" % bad)
 
     print("ok: %d abertos, %d favoritos, %d recentes, %d icones, manifest %d bytes, icon %d bytes"
           % (len(p["running"]), len(p["favorites"]), len(p["recent"]),

@@ -72,6 +72,18 @@ sudo dnf install wtype                                             # Wayland, te
 sudo dnf install xdotool                                           # X11 (no Wayland só alcança apps XWayland)
 ```
 
+## Várias telas
+
+Com mais de um monitor, a tecla `TELA` aparece no fim dos favoritos: ela mostra o
+número da tela que o deck comanda e abre a lista para trocar. Os aplicativos
+lançados ou focados pelo celular vão para essa tela e são maximizados nela. Em
+`Automática` o deck não interfere — a janela abre onde o sistema quiser.
+
+A escolha fica em `settings.json`, ao lado do `apps.json` (`{"screen": "DP-2"}`).
+O `id` é o nome do dispositivo: `\\.\DISPLAY2` no Windows, o nome do output
+(`DP-2`, `HDMI-A-1`) no Linux. Se o monitor escolhido for desconectado, o deck
+volta sozinho para o comportamento automático.
+
 ## Desenvolvimento
 
 ```

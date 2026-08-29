@@ -15,6 +15,7 @@ remove dos favoritos.
 Favoritos ficam em apps.json (name + path). No Windows path aceita .exe, .lnk,
 pasta ou URL; no Linux, um .desktop, pasta ou URL. Em vez de path, um favorito
 pode ter keys ("ctrl+shift+m"): o toque manda esse atalho pro teclado do PC.
+Com mais de um monitor da pra escolher em qual as janelas abrem (settings.json).
 Porta: variavel de ambiente DECK_PORT (padrao 8765).
 """
 import gzip
@@ -51,6 +52,7 @@ else:
     DATA_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME",
                                            os.path.expanduser("~/.config")), "StreamDeck")
 FAVS = os.path.join(DATA_DIR, "apps.json")
+SETTINGS = os.path.join(DATA_DIR, "settings.json")
 PORT = int(os.environ.get("DECK_PORT", 8765))
 
 # Atalhos de teclado ---------------------------------------------------------
@@ -182,6 +184,40 @@ def save_favorites(favs):
         json.dump(favs, f, indent=2, ensure_ascii=False)
 
 
+def settings():
+    try:
+        with open(SETTINGS, encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+def save_settings(cfg):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(SETTINGS, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
+
+
+def target_screen():
+    """Id da tela que o deck comanda, ou None pra deixar o sistema decidir.
+
+    Tela desconectada vale como None: melhor abrir onde der do que nao abrir.
+    """
+    chosen = settings().get("screen")
+    if not chosen:
+        return None
+    return chosen if any(s["id"] == chosen for s in backend.list_screens()) else None
+
+
+def choose_screen(req):
+    screen = req.get("screen") or None
+    if screen and not any(s["id"] == screen for s in backend.list_screens()):
+        raise ValueError("essa tela nao esta conectada")
+    cfg = settings()
+    cfg["screen"] = screen
+    save_settings(cfg)
+
+
 def icons_for(paths):
     """{caminho: URL do icone}. Extrai uma vez por app e serve do cache depois."""
     missing = sorted({p for p in paths if p and p not in _icon_cache})
@@ -222,7 +258,10 @@ def apps_payload():
                           + [w["path"] for w in windows]
                           + [a["path"] for a in recent])
         fav_paths = {a.get("path", "").lower() for a in favs}
+        chosen = settings().get("screen")
         return {
+            "screens": [{"id": s["id"], "name": s["name"], "w": s["w"], "h": s["h"],
+                          "on": s["id"] == chosen} for s in backend.list_screens()],
             "favorites": [fav_item(a, icons) for a in favs],
             "running": [
                 {"pid": w["id"],
@@ -239,8 +278,9 @@ def apps_payload():
 
 
 def run(req):
+    screen = target_screen()
     if "pid" in req:
-        return backend.focus(req["pid"])
+        return backend.focus(req["pid"], screen)
     if "recent" in req:
         path = _recents[int(req["recent"])]["path"]
     else:
@@ -253,9 +293,9 @@ def run(req):
             raise ValueError("favorito sem path nem keys no apps.json")
     win = next((w for w in backend.list_windows() if w["path"] and same(w["path"], path)), None)
     if win:
-        backend.focus(win["id"])
+        backend.focus(win["id"], screen)
     else:
-        backend.launch(path)
+        backend.launch(path, screen)
 
 
 def edit_favorites(req):
@@ -318,6 +358,8 @@ class Deck(http.server.BaseHTTPRequestHandler):
             action = run
         elif self.path == "/api/fav":
             action = edit_favorites
+        elif self.path == "/api/screen":
+            action = choose_screen
         else:
             return self.send_error(404)
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
@@ -541,6 +583,13 @@ def selfcheck():
     assert all(_icon_data[u["icon"][3:]] for u in p["recent"] if u["icon"])
     assert any(u["icon"] for u in p["recent"]), "nenhum icone extraido"
 
+    # Sem telas na lista o deck so perde a escolha de monitor - quem cobra isso e
+    # o autoteste do backend, que sabe se o sistema devia ter respondido.
+    screens = backend.list_screens()
+    assert all({"id", "name", "w", "h"} <= set(s) for s in screens)
+    assert len(p["screens"]) == len(screens)
+    assert sum(s["on"] for s in p["screens"]) <= 1, "duas telas marcadas como a escolhida"
+
     assert KEY_NAMES <= backend.KEYS, ("teclas sem traducao no backend: %s"
                                       % sorted(KEY_NAMES - backend.KEYS))
     assert parse_hotkey("Ctrl+Shift+M") == (["ctrl", "shift"], "m")
@@ -556,6 +605,9 @@ def selfcheck():
     print("ok: %d abertos, %d favoritos, %d recentes, %d icones, manifest %d bytes, icon %d bytes"
           % (len(p["running"]), len(p["favorites"]), len(p["recent"]),
              len(_icon_data), len(MANIFEST), len(ICON)))
+    print("ok: telas %s, comandando %s"
+          % (", ".join("%s (%dx%d)" % (s["name"], s["w"], s["h"]) for s in screens) or "(nenhuma)",
+             target_screen() or "a que o sistema escolher"))
     backend.selfcheck()
 
 

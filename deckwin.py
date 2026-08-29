@@ -23,7 +23,12 @@ USER_ASSIST = r"Software\Microsoft\Windows\CurrentVersion\Explorer\UserAssist"
 RECENT_MAX = int(os.environ.get("DECK_RECENT_MAX", 24))
 
 GW_OWNER = 4
+SW_RESTORE = 9
 SW_MAXIMIZE = 3
+SWP_NOZORDER = 4
+SWP_NOACTIVATE = 0x10
+MONITORINFOF_PRIMARY = 1
+MONITOR_DEFAULTTONEAREST = 2
 VK_MENU = 0x12
 VK_SHIFT = 0x10
 KEYEVENTF_EXTENDEDKEY = 1
@@ -33,6 +38,16 @@ PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _user32 = ctypes.WinDLL("user32", use_last_error=True)
 _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 _ENUM_PROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+_MONITOR_PROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HMONITOR, wintypes.HDC,
+                                   ctypes.POINTER(wintypes.RECT), wintypes.LPARAM)
+
+
+class MONITORINFOEXW(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD),
+                ("rcMonitor", wintypes.RECT),
+                ("rcWork", wintypes.RECT),
+                ("dwFlags", wintypes.DWORD),
+                ("szDevice", wintypes.WCHAR * 32)]
 
 
 def _bind(dll, name, restype, *argtypes):
@@ -55,6 +70,15 @@ _SetForegroundWindow = _bind(_user32, "SetForegroundWindow", wintypes.BOOL, wint
 _ShowWindow = _bind(_user32, "ShowWindow", wintypes.BOOL, wintypes.HWND, ctypes.c_int)
 _keybd_event = _bind(_user32, "keybd_event", None, ctypes.c_ubyte, ctypes.c_ubyte,
                      wintypes.DWORD, ctypes.c_size_t)
+_IsZoomed = _bind(_user32, "IsZoomed", wintypes.BOOL, wintypes.HWND)
+_SetWindowPos = _bind(_user32, "SetWindowPos", wintypes.BOOL, wintypes.HWND, wintypes.HWND,
+                      ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT)
+_EnumDisplayMonitors = _bind(_user32, "EnumDisplayMonitors", wintypes.BOOL, wintypes.HDC,
+                             ctypes.POINTER(wintypes.RECT), _MONITOR_PROC, wintypes.LPARAM)
+_GetMonitorInfoW = _bind(_user32, "GetMonitorInfoW", wintypes.BOOL,
+                         wintypes.HMONITOR, ctypes.POINTER(MONITORINFOEXW))
+_MonitorFromWindow = _bind(_user32, "MonitorFromWindow", wintypes.HMONITOR,
+                           wintypes.HWND, wintypes.DWORD)
 _OpenProcess = _bind(_kernel32, "OpenProcess", wintypes.HANDLE,
                      wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
 _CloseHandle = _bind(_kernel32, "CloseHandle", wintypes.BOOL, wintypes.HANDLE)
@@ -271,33 +295,87 @@ def recents(favs):
     return apps
 
 
+# telas ----------------------------------------------------------------------
+
+
+def list_screens():
+    """Monitores da esquerda pra direita. `id` e o nome do dispositivo (\\.\DISPLAY1)."""
+    found = []
+
+    def visit(handle, _hdc, _rect, _lparam):
+        info = MONITORINFOEXW()
+        info.cbSize = ctypes.sizeof(MONITORINFOEXW)
+        if _GetMonitorInfoW(handle, ctypes.byref(info)):
+            work, area = info.rcWork, info.rcMonitor
+            found.append({
+                "id": info.szDevice,
+                "name": info.szDevice.replace("\\\\.\\", ""),
+                "w": area.right - area.left,
+                "h": area.bottom - area.top,
+                "primary": bool(info.dwFlags & MONITORINFOF_PRIMARY),
+                "work": (work.left, work.top, work.right, work.bottom),
+                "at": (area.left, area.top),
+            })
+        return True
+
+    _EnumDisplayMonitors(None, None, _MONITOR_PROC(visit), 0)
+    found.sort(key=lambda s: s["at"])
+    return found
+
+
+def move_to_screen(hwnd, screen):
+    """Joga a janela pra tela escolhida. Chamar antes de maximizar.
+
+    O Windows maximiza no monitor onde a janela esta, entao mover so funciona
+    com ela restaurada - e uma janela ja maximizada na tela certa fica quieta,
+    senao piscaria a cada toque.
+    """
+    if not screen:
+        return
+    target = next((s for s in list_screens() if s["id"] == screen), None)
+    if target is None:
+        return
+    info = MONITORINFOEXW()
+    info.cbSize = ctypes.sizeof(MONITORINFOEXW)
+    handle = _MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
+    if _GetMonitorInfoW(handle, ctypes.byref(info)) and info.szDevice == screen:
+        return
+    if _IsZoomed(hwnd):
+        _ShowWindow(hwnd, SW_RESTORE)
+    left, top, right, bottom = target["work"]
+    width, height = (right - left) // 2, (bottom - top) // 2
+    _SetWindowPos(hwnd, None, left + width // 2, top + height // 2, width, height,
+                  SWP_NOZORDER | SWP_NOACTIVATE)
+
+
 # ponytail: o toque no ALT dribla o foreground lock do Windows. Sem ele o
 # SetForegroundWindow devolve False e a janela abre atras das outras.
 # Maximiza sempre - do celular nao da pra arrastar borda pra redimensionar,
 # entao a janela pequena que o app abre por padrao so atrapalha.
-def activate(hwnd):
+def activate(hwnd, screen=None):
     _keybd_event(VK_MENU, 0, 0, 0)
     _keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
+    move_to_screen(hwnd, screen)
     _ShowWindow(hwnd, SW_MAXIMIZE)
     _SetForegroundWindow(hwnd)
 
 
-def focus(window_id):
+def focus(window_id, screen=None):
     pid = int(window_id)
     for hwnd, owner in main_windows():
         if owner == pid:
-            activate(hwnd)
+            activate(hwnd, screen)
             return
 
 
-def launch(path):
+def launch(path, screen=None):
     before = {hwnd for hwnd, _ in main_windows()}
     os.startfile(path)
     for _try in range(20):
         time.sleep(0.25)
         for hwnd, _pid in main_windows():
             if hwnd not in before:
-                activate(hwnd)
+                activate(hwnd, screen)
                 return
 
 
@@ -341,6 +419,12 @@ def selfcheck():
     def main_window(pid):
         return next((h for h, owner in main_windows() if owner == pid), None)
 
+    screens = list_screens()
+    assert screens, "EnumDisplayMonitors nao devolveu nenhum monitor"
+    assert sum(s["primary"] for s in screens) == 1, "deveria haver um monitor primario"
+    print("ok: %d tela(s): %s" % (len(screens), ", ".join(
+        "%s %dx%d" % (s["name"], s["w"], s["h"]) for s in screens)))
+
     if foreground_owner() == LOCK_SCREEN:
         print("aviso: sessao bloqueada, teste da trava de foreground pulado")
         return
@@ -361,6 +445,19 @@ def selfcheck():
         focus(pad["id"])
         time.sleep(0.6)
         assert _GetForegroundWindow() == handle, "janela existente ficou atras (trava de foreground)"
+        if len(screens) > 1:
+            # Manda o bloco de notas pro monitor onde ele nao esta e confere que foi.
+            info = MONITORINFOEXW()
+            info.cbSize = ctypes.sizeof(MONITORINFOEXW)
+            _GetMonitorInfoW(_MonitorFromWindow(handle, MONITOR_DEFAULTTONEAREST),
+                             ctypes.byref(info))
+            other = next(s for s in screens if s["id"] != info.szDevice)
+            focus(pad["id"], other["id"])
+            time.sleep(0.6)
+            _GetMonitorInfoW(_MonitorFromWindow(handle, MONITOR_DEFAULTTONEAREST),
+                             ctypes.byref(info))
+            assert info.szDevice == other["id"], "a janela nao foi pra tela %s" % other["name"]
+            print("ok: janela movida pra %s" % other["name"])
     finally:
         ps("Stop-Process -Id %d -Force" % pad["id"])
     print("ok: trava de foreground vencida no lancamento e no foco")

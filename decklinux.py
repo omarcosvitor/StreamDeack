@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 
 from gi.repository import Gio, GLib
 
@@ -277,6 +278,44 @@ def send_keys(mods, key):
 
 # contrato do deck.py --------------------------------------------------------
 
+# O KWin nao expoe "mova pra tela X" de um jeito so em todas as versoes: tenta o
+# sendClientToScreen e, se a janela nao andou, posiciona pela geometria - o
+# maximizar depois vale pra tela onde ela estiver.
+TO_SCREEN_JS = """
+function toScreen(w, want) {
+  if (!want) return;
+  // Nada aqui pode derrubar o foco: numa versao sem essa API a janela so nao anda.
+  try {
+    var outs = workspace.screens || [];
+    for (var i = 0; i < outs.length; i++) {
+      if (outs[i].name !== want) continue;
+      try { workspace.sendClientToScreen(w, outs[i]); } catch (e) { }
+      var g = outs[i].geometry, f = w.frameGeometry;
+      if (f.x < g.x || f.x >= g.x + g.width || f.y < g.y || f.y >= g.y + g.height) {
+        w.setMaximize(false, false);
+        w.frameGeometry = {x: g.x + Math.round(g.width / 6), y: g.y + Math.round(g.height / 6),
+                           width: Math.round(g.width * 2 / 3), height: Math.round(g.height * 2 / 3)};
+      }
+      return;
+    }
+  } catch (e) { }
+}
+"""
+
+# Lista vazia se a versao do KWin nao expuser as telas: o deck segue funcionando
+# sem a escolha de monitor, em vez de o painel inteiro parar de carregar.
+SCREENS_JS = """
+var out = [];
+try {
+  var all = workspace.screens || [];
+  for (var i = 0; i < all.length; i++) {
+    var g = all[i].geometry;
+    out.push({id: all[i].name, name: all[i].name, w: g.width, h: g.height, x: g.x, y: g.y});
+  }
+} catch (e) { out = []; }
+send(out);
+"""
+
 LIST_JS = """
 var out = [], all = workspace.windowList();
 for (var i = 0; i < all.length; i++) {
@@ -288,7 +327,7 @@ for (var i = 0; i < all.length; i++) {
 send(out);
 """
 
-FOCUS_JS = """
+FOCUS_JS = TO_SCREEN_JS + """
 var all = workspace.windowList(), hit = 0;
 for (var i = 0; i < all.length; i++) {
   if (String(all[i].internalId) !== %s) continue;
@@ -296,6 +335,7 @@ for (var i = 0; i < all.length; i++) {
   hit = 1;
   w.minimized = false;
   if (w.desktops && w.desktops.length) workspace.currentDesktop = w.desktops[0];
+  toScreen(w, %s);
   // Do celular nao da pra arrastar borda, entao maximiza sempre (igual no Windows).
   w.setMaximize(true, true);
   workspace.activeWindow = w;
@@ -317,18 +357,39 @@ def list_windows():
     return out
 
 
-def focus(window_id):
-    kwin(FOCUS_JS % json.dumps(str(window_id)))
+def list_screens():
+    """Monitores da esquerda pra direita. `id` e o nome do output (HDMI-A-1, DP-2).
+
+    Vazio quando o KWin nao responde: sem a lista o deck so perde a escolha de
+    tela, e um painel de favoritos vale mais que um erro na tela do celular.
+    """
+    try:
+        out = kwin(SCREENS_JS)
+    except RuntimeError:
+        return []
+    out.sort(key=lambda s: (s["x"], s["y"]))
+    return out
 
 
-def launch(path):
+def focus(window_id, screen=None):
+    kwin(FOCUS_JS % (json.dumps(str(window_id)), json.dumps(screen or "")))
+
+
+def launch(path, screen=None):
     """`.desktop` respeita Exec, Terminal e variaveis do ambiente; o resto e xdg-open."""
+    # Sem tela escolhida nao espera a janela aparecer - o KWin ja da foco a ela.
+    before = {w["id"] for w in kwin(LIST_JS)} if screen else set()
     if path.endswith(".desktop"):
         subprocess.Popen(["gio", "launch", path], start_new_session=True)
     else:
         subprocess.Popen(["xdg-open", path], start_new_session=True)
-    # ponytail: sem esperar a janela aparecer - o KWin ja da foco a janela nova.
-    # Se a prevencao de roubo de foco estiver alta, poderia focar em seguida.
+    if not screen:
+        return
+    for _try in range(20):
+        time.sleep(0.25)
+        for w in kwin(LIST_JS):
+            if w["id"] not in before:
+                return focus(w["id"], screen)
 
 
 def recents(favs):
@@ -360,10 +421,19 @@ def show_error(message):
 def selfcheck():
     windows = list_windows()
     assert windows, "nenhuma janela aberta - o script KWin nao listou nada"
-    assert kwin(FOCUS_JS % json.dumps(windows[0]["id"])) == 1, "focar a janela falhou"
+    assert kwin(FOCUS_JS % (json.dumps(windows[0]["id"]), json.dumps(""))) == 1, "focar a janela falhou"
+    screens = list_screens()
+    if screens:
+        # Mandar pra tela onde a janela ja esta: exercita o toScreen sem baguncar nada.
+        here = screens[0]["id"]
+        assert kwin(FOCUS_JS % (json.dumps(windows[0]["id"]), json.dumps(here))) == 1, \
+            "mover a janela pra tela %s falhou" % here
+    else:
+        print("aviso: este KWin nao listou telas - escolha de monitor indisponivel")
     assert icon_index(), "nenhum icone encontrado no tema"
     tool = next((n for n, _b in keyboard_tools() if shutil.which(n)), None)
-    print("ok: KWin responde, %d icones indexados, tema %r, teclado por %s"
-          % (len(icon_index()), _read_theme() or "(padrao)", tool or "(nada instalado)"))
+    print("ok: KWin responde, %d icones indexados, tema %r, teclado por %s, %d tela(s)"
+          % (len(icon_index()), _read_theme() or "(padrao)", tool or "(nada instalado)",
+             len(screens)))
     if not tool:
         print("aviso: atalhos de teclado indisponiveis - " + NO_TOOL)

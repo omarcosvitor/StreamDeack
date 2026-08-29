@@ -76,9 +76,10 @@
            display:flex; align-items:center; justify-content:center; padding:14px;
            background:rgba(23,33,44,.42); }
   #sheet[hidden] { display:none; }
-  #sheet form { width:100%; max-width:380px; max-height:100%; overflow-y:auto;
-                padding:16px; border-radius:18px; background:#fff;
-                box-shadow:0 18px 44px rgba(40,55,70,.32); }
+  #sheet .panel { width:100%; max-width:380px; max-height:100%; overflow-y:auto;
+                  padding:16px; border-radius:18px; background:#fff;
+                  box-shadow:0 18px 44px rgba(40,55,70,.32); }
+  #sheet .panel[hidden] { display:none; }
   #sheet h2 { margin:0 0 12px; font-size:15px; letter-spacing:.02em; }
   #sheet label { display:block; margin-bottom:10px; font-size:11px;
                  text-transform:uppercase; letter-spacing:.08em; color:#68788a; }
@@ -90,10 +91,19 @@
   #sheet button { padding:9px 14px; border:1px solid #d3dbe3; border-radius:11px;
                   background:#f7f9fb; color:#33485c; font:600 13px inherit; }
   #mods button.on { border-color:#e8933a; background:#fbeedd; color:#8a4d12; }
-  #acts { display:flex; gap:8px; justify-content:flex-end; margin-top:4px; }
-  #acts button.go { border-color:#c96d1d; background:#e8933a; color:#fff; }
-  #hint { margin:0 0 12px; font-size:11px; color:#7d8b99; line-height:1.45; }
+  .acts { display:flex; gap:8px; justify-content:flex-end; margin-top:4px; }
+  .acts button.go { border-color:#c96d1d; background:#e8933a; color:#fff; }
+  .hint { margin:0 0 12px; font-size:11px; color:#7d8b99; line-height:1.45; }
   #sheet button.busy { opacity:.52; }
+  #scr-list { display:flex; flex-direction:column; gap:7px; margin-bottom:12px; }
+  #scr-list button { display:flex; align-items:baseline; gap:8px; width:100%;
+                     text-align:left; padding:11px 13px; }
+  #scr-list button.on { border-color:#e8933a; background:#fbeedd; color:#8a4d12; }
+  #scr-list small { font-weight:400; font-size:11px; opacity:.7; }
+  /* Tecla de tela: um monitorzinho com o numero da tela que o deck comanda. */
+  .key .ph.scr { background:none; border:2px solid #7a8b9c; border-radius:4px;
+                 color:#33485c; }
+  .key .ph.scr.on { border-color:#c96d1d; color:#8a4d12; }
 
   @media (prefers-reduced-motion: reduce) { .key, .key .glow, #dots, #toast { transition:none; } }
 </style>
@@ -104,9 +114,9 @@
 </div>
 <div id="dots"><i class="on"></i><i></i></div>
 <div id="sheet" hidden>
-  <form id="hk">
+  <form id="hk" class="panel">
     <h2>Novo atalho de teclado</h2>
-    <p id="hint">O toque manda essas teclas pra janela que estiver em foco no PC.</p>
+    <p class="hint">O toque manda essas teclas pra janela que estiver em foco no PC.</p>
     <div id="mods">
       <button type="button" data-mod="ctrl">Ctrl</button>
       <button type="button" data-mod="shift">Shift</button>
@@ -121,15 +131,21 @@
     <label>Nome (opcional)
       <input id="hk-name" autocomplete="off" placeholder="Mutar microfone">
     </label>
-    <div id="acts">
+    <div class="acts">
       <button type="button" id="hk-no">Cancelar</button>
       <button type="submit" class="go">Salvar</button>
     </div>
   </form>
+  <div id="scr" class="panel" hidden>
+    <h2>Tela que o deck comanda</h2>
+    <p class="hint">Os aplicativos abrem e sao maximizados na tela escolhida.</p>
+    <div id="scr-list"></div>
+    <div class="acts"><button type="button" id="scr-no">Fechar</button></div>
+  </div>
 </div>
 <div id="toast"></div>
 <script>
-var data = { favorites: [], running: [], recent: [] };
+var data = { favorites: [], running: [], recent: [], screens: [] };
 var grid = { cols: 5, rows: 3, gap: 10, pad: 5, size: 100, w: 0, h: 0 };
 var tints = {};
 var skins = {};
@@ -295,6 +311,7 @@ stage.addEventListener('click', function (e) {
 
 function tap(k) {
   if (k.kind === 'new') return openSheet();
+  if (k.kind === 'screen') return openScreens();
   if (k.kind === 'open') return post('/api/run', { pid: k.idx }, k);
   if (k.kind === 'recent') return post('/api/run', { recent: k.idx }, k);
   post('/api/run', { fav: k.idx }, k);
@@ -302,6 +319,7 @@ function tap(k) {
 
 function hold(k) {
   if (k.kind === 'new') return openSheet();
+  if (k.kind === 'screen') return openScreens();
   if (k.kind === 'fav') return post('/api/fav', { remove: k.idx }, k).then(load);
   if (k.kind === 'recent') return post('/api/fav', { add_recent: k.idx }, k).then(load);
   if (k.isFav) return toast(k.label + ' ja esta nos favoritos');
@@ -344,6 +362,23 @@ function combo(keys, as) {
   return art;
 }
 
+// Numero da tela escolhida (1, 2, 3...) ou "-" quando o sistema e quem decide.
+function screenNumber() {
+  for (var i = 0; i < data.screens.length; i++) if (data.screens[i].on) return String(i + 1);
+  return '\u2013';
+}
+
+function display(as) {
+  var art = document.createElement('div');
+  var picked = screenNumber() !== '\u2013';
+  art.className = picked ? 'ph scr on' : 'ph scr';
+  art.textContent = screenNumber();
+  art.style.cssText = 'width:' + as + 'px;height:' + Math.round(as * 0.72) +
+                      'px;font-size:' + Math.round(as * 0.42) + 'px;margin-bottom:' +
+                      (15 + as - Math.round(as * 0.72)) + 'px';
+  return art;
+}
+
 function buildKey(item, size, kind, idx) {
   var b = MOLD.cloneNode(true);
   var glow = b.firstChild;
@@ -356,6 +391,9 @@ function buildKey(item, size, kind, idx) {
     art.style.cssText = 'width:' + as + 'px;height:' + as + 'px';
     art.onload = function () { paint(b, glow, art); };
     art.src = item.icon;
+  } else if (item.screen) {
+    art = display(as);
+    paint(b, glow, null, null);
   } else if (item.keys || item.plus) {
     art = combo(item.keys, as);
     paint(b, glow, null, item.keys ? ACCENT : null);
@@ -390,17 +428,23 @@ function fill(page, items, size, kind, from, count) {
   page.appendChild(frag);
 }
 
-// A tecla "+" ocupa a vaga seguinte ao ultimo favorito. Se os favoritos lotarem
-// as duas paginas ela toma a vaga final da segunda - some um favorito, mas do
-// celular continua dando pra criar atalho.
-function fillFav(page, from, count, last) {
-  var favs = data.favorites;
+// Favoritos + as teclas de controle no fim (criar atalho e, com mais de um
+// monitor, escolher a tela). Se nao couber tudo nas duas paginas, sobra
+// favorito de fora - as de controle ficam, senao nao teria como voltar atras.
+function favKeys(cap) {
+  var all = data.favorites.map(function (a, i) { return { item: a, kind: 'fav', idx: i }; });
+  var tail = [{ item: { name: 'novo atalho', plus: true }, kind: 'new', idx: -1 }];
+  if (data.screens.length > 1)
+    tail.push({ item: { name: 'tela ' + screenNumber(), screen: true }, kind: 'screen', idx: -1 });
+  all = all.concat(tail);
+  return all.length <= cap ? all : all.slice(0, cap - tail.length).concat(tail);
+}
+
+function fillKeys(page, keys, from, count) {
   var frag = document.createDocumentFragment();
-  var room = (last && favs.length >= from + count) ? count - 1 : count;
-  var end = Math.min(favs.length, from + room);
-  for (var i = from; i < end; i++) frag.appendChild(buildKey(favs[i], grid.size, 'fav', i));
-  if (favs.length >= from && (favs.length < from + count || last))
-    frag.appendChild(buildKey({ name: 'novo atalho', plus: true }, grid.size, 'new', -1));
+  var end = Math.min(keys.length, from + count);
+  for (var i = from; i < end; i++)
+    frag.appendChild(buildKey(keys[i].item, grid.size, keys[i].kind, keys[i].idx));
   page.textContent = '';
   page.appendChild(frag);
 }
@@ -425,10 +469,10 @@ function render() {
            size: Math.max(52, Math.min(140, Math.floor(Math.min(w / cols, h / rows)) - gap)) };
 
   var per = cols * rows;
-  fillFav(P.fav0, 0, per, false);
-  fillFav(P.fav1, per, per, true);
-  // +1: a ultima vaga e sempre a tecla de criar atalho.
-  var second = data.favorites.length + 1 > per ? '' : 'none';
+  var keys = favKeys(per * 2);
+  fillKeys(P.fav0, keys, 0, per);
+  fillKeys(P.fav1, keys, per, per);
+  var second = keys.length > per ? '' : 'none';
   if (P.fav1.style.display !== second) P.fav1.style.display = second;
 
   fill(P.open, data.running, autoSize(data.running.length || 1), 'open', 0, data.running.length);
@@ -475,6 +519,8 @@ var keyIn = document.getElementById('hk-key');
 var nameIn = document.getElementById('hk-name');
 var modsEl = document.getElementById('mods');
 var saveBtn = form.querySelector('.go');
+var scr = document.getElementById('scr');
+var scrList = document.getElementById('scr-list');
 
 (function () {
   var list = document.getElementById('hk-keys');
@@ -492,11 +538,46 @@ function openSheet() {
   nameIn.value = '';
   var chips = modsEl.children;
   for (var i = 0; i < chips.length; i++) chips[i].className = '';
+  form.hidden = false;
+  scr.hidden = true;
   sheet.hidden = false;
   keyIn.focus();
 }
 
 function closeSheet() { sheet.hidden = true; }
+
+// Escolher a tela: uma linha por monitor mais a opcao de nao mandar em nenhuma.
+function openScreens() {
+  var frag = document.createDocumentFragment();
+  var rows = data.screens.map(function (s, i) {
+    return { id: s.id, on: s.on, title: 'Tela ' + (i + 1) + ' \u00b7 ' + s.name,
+             note: s.w + '\u00d7' + s.h };
+  });
+  rows.push({ id: '', on: !data.screens.some(function (s) { return s.on; }),
+              title: 'Automatica', note: 'onde o sistema abrir' });
+  rows.forEach(function (row) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = row.on ? 'on' : '';
+    b.appendChild(document.createTextNode(row.title));
+    var note = document.createElement('small');
+    note.textContent = row.note;
+    b.appendChild(note);
+    b.onclick = function () {
+      post('/api/screen', { screen: row.id }, b).then(function (ok) {
+        if (!ok) return;
+        closeSheet();
+        load();
+      });
+    };
+    frag.appendChild(b);
+  });
+  scrList.textContent = '';
+  scrList.appendChild(frag);
+  form.hidden = true;
+  scr.hidden = false;
+  sheet.hidden = false;
+}
 
 modsEl.addEventListener('click', function (e) {
   var chip = e.target.closest ? e.target.closest('button') : null;
@@ -506,6 +587,7 @@ modsEl.addEventListener('click', function (e) {
 });
 
 document.getElementById('hk-no').addEventListener('click', closeSheet);
+document.getElementById('scr-no').addEventListener('click', closeSheet);
 sheet.addEventListener('click', function (e) { if (e.target === sheet) closeSheet(); });
 document.addEventListener('keydown', function (e) {
   if (e.key === 'Escape' && !sheet.hidden) closeSheet();

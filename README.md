@@ -12,20 +12,17 @@ Os favoritos ficam em `%LOCALAPPDATA%\StreamDeck\apps.json` e são preservados q
 ## Instalar no Linux
 
 Requer KDE Plasma 6 (as janelas são controladas por um script do KWin) e o
-`python3-gobject`, que já vem instalado em qualquer Plasma. Sem instalador:
+`python3-gobject`, que já vem instalado em qualquer Plasma. Baixe o
+`StreamDeck-<versao>-linux.tar.gz` na [última versão](https://github.com/omarcosvitor/StreamDeack/releases/latest):
 
 ```bash
-git clone https://github.com/omarcosvitor/StreamDeack.git ~/.local/share/StreamDeck
-python3 ~/.local/share/StreamDeck/deck.py serve
+tar --extract --gzip --file StreamDeck-<versao>-linux.tar.gz
+cd StreamDeck-<versao> && ./install.sh
 ```
 
-Para deixar rodando em segundo plano, um serviço de usuário do systemd:
-
-```bash
-systemd-run --user --unit=streamdeck --description='StreamDeck de bolso' \
-  python3 ~/.local/share/StreamDeck/deck.py serve
-systemctl --user enable --now streamdeck   # opcional: subir junto com a sessão
-```
+O `install.sh` copia o programa para `~/.local/share/StreamDeck` e sobe um serviço
+de usuário do systemd, que volta junto com a sessão. Para parar e remover o
+serviço sem apagar os favoritos: `./install.sh --uninstall`.
 
 Libere a porta no firewall na primeira vez:
 `sudo firewall-cmd --add-port=8765/tcp --permanent && sudo firewall-cmd --reload`
@@ -95,13 +92,21 @@ python deck.py check    autoteste
 `deck.py` é comum aos dois sistemas; `deckwin.py` e `decklinux.py` implementam
 listar/focar/lançar janelas, extrair ícones e a lista de recentes em cada um.
 
-## Gerar o instalador
+## Gerar os pacotes
 
-Requer Python 3.12+ e Inno Setup 6. O script cria um ambiente virtual e instala as dependências de build automaticamente:
+Cada push na `main` publica uma release nova (`.github/workflows/build.yml`), com
+o instalador do Windows, o pacote do Linux, a lista do que mudou desde a release
+anterior e o sha256 de cada arquivo. A versão incrementa o patch da anterior; para
+fixar outra, rode o workflow pela aba Actions informando `x.y.z`.
+
+Na mão, o instalador do Windows requer Python 3.12+ e Inno Setup 6. O script cria
+um ambiente virtual e instala as dependências de build automaticamente:
 
 ```powershell
 winget install JRSoftware.InnoSetup
 .\build.ps1 -Version 1.1.0
 ```
 
-O instalador é criado em `release\StreamDeck-Setup-1.1.0.exe`.
+O instalador é criado em `release\StreamDeck-Setup-1.1.0.exe`. O pacote do Linux
+não tem build: é o código (`deck.py`, `decklinux.py`, `index.html`, `install.sh`)
+num tar.gz, porque o `decklinux` usa o `python3-gobject` da distro.

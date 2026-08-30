@@ -1,30 +1,64 @@
-name: Instalador
+name: Release
 
-# Gera o instalador do Windows a cada push na main e publica na release
-# "latest", que sempre aponta pro ultimo commit:
-# https://github.com/omarcosvitor/StreamDeack/releases/latest
+# Cada push na main publica uma release nova, com o instalador do Windows e o
+# pacote do Linux. A versao incrementa o patch da ultima release publicada, de
+# modo que o historico fica na lista de releases:
+# https://github.com/omarcosvitor/StreamDeack/releases
 on:
   push:
     branches: [main]
   workflow_dispatch:
     inputs:
       version:
-        description: "Versao do instalador (x.y.z)"
+        description: "Versao (x.y.z). Vazio incrementa o patch da ultima release."
         required: false
-        default: "1.1.0"
 
 permissions:
   contents: write
 
 concurrency:
-  group: instalador-${{ github.ref }}
-  cancel-in-progress: true
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
+  versao:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.calc.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: calc
+        env:
+          ENTRADA: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "$ENTRADA" ]; then
+            echo "$ENTRADA" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
+              || { echo "Versao invalida: $ENTRADA" >&2; exit 1; }
+            version="$ENTRADA"
+          else
+            anterior=$(git tag --list 'v*' --sort=-v:refname | head -n 1)
+            if [ -z "$anterior" ]; then
+              # Primeira release versionada: parte do default do build.ps1, que
+              # continua sendo a versao usada em quem gera o instalador na mao.
+              version=$(sed -n 's/.*Version = .\([0-9][0-9.]*\).*/\1/p' build.ps1 | head -n 1)
+              [ -n "$version" ] || { echo "Nao achei a versao no build.ps1" >&2; exit 1; }
+            else
+              IFS=. read -r maior menor patch <<< "${anterior#v}"
+              version="$maior.$menor.$((patch + 1))"
+            fi
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Versao desta release: $version"
+
   windows:
+    needs: versao
     runs-on: windows-latest
     env:
-      VERSION: ${{ inputs.version || '1.1.0' }}
+      VERSION: ${{ needs.versao.outputs.version }}
 
     steps:
       - uses: actions/checkout@v4
@@ -63,31 +97,110 @@ jobs:
           Write-Host ("{0} - {1:N1} MB" -f $exe.Name, ($exe.Length / 1MB))
           if ($exe.Length -lt 1MB) { throw 'Instalador menor que o esperado.' }
 
-      # Publica como release em vez de artefato: o .exe ganha link fixo e nao
-      # consome a cota de armazenamento de artefatos do Actions, pequena demais
-      # pra um instalador de ~12 MB por push.
-      - name: Publicar o instalador
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: release/StreamDeck-Setup-${{ needs.versao.outputs.version }}.exe
+          retention-days: 1
+
+  linux:
+    needs: versao
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.versao.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pacote de codigo, nao binario: o decklinux usa o python3-gobject da
+      # distro (que o README ja exige) e o KWin. Empacotar o GLib do runner
+      # Ubuntu quebraria justamente no Fedora/KDE, que e o alvo do backend.
+      - name: Montar o pacote
         run: |
-          $ErrorActionPreference = 'Continue'
-          $PSNativeCommandUseErrorActionPreference = $false
+          set -euo pipefail
+          pasta="StreamDeck-$VERSION"
+          mkdir -p "$pasta"
+          cp deck.py decklinux.py index.html install.sh README.md "$pasta/"
+          chmod +x "$pasta/install.sh"
+          tar --create --gzip --file "StreamDeck-$VERSION-linux.tar.gz" "$pasta"
 
-          $exe = "release\StreamDeck-Setup-$env:VERSION.exe"
-          $notas = @(
-            "Instalador gerado a partir do commit $($env:GITHUB_SHA.Substring(0, 7)) na main.",
-            "",
-            "Baixe o **StreamDeck-Setup-$env:VERSION.exe** aqui embaixo e execute.",
-            "Nao precisa de Python nem de permissao de administrador.",
-            "",
-            "Os favoritos ficam em %LOCALAPPDATA%\StreamDeck\apps.json e sobrevivem a atualizacao."
-          ) -join "`n"
+      - name: Conferir o pacote
+        run: |
+          set -euo pipefail
+          python3 -m compileall -q deck.py decklinux.py
+          sh -n install.sh
+          tar --list --file "StreamDeck-$VERSION-linux.tar.gz"
 
-          # Release rolante: apaga a anterior pra tag apontar pro commit novo.
-          # Na primeira execucao ainda nao existe nada, e falhar aqui e esperado.
-          gh release delete latest --yes --cleanup-tag
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: StreamDeck-${{ needs.versao.outputs.version }}-linux.tar.gz
+          retention-days: 1
 
-          gh release create latest $exe --target $env:GITHUB_SHA --title "StreamDeck $env:VERSION" --notes $notas
-          if ($LASTEXITCODE -ne 0) { throw "Nao foi possivel publicar a release (codigo $LASTEXITCODE)." }
+  publicar:
+    needs: [versao, windows, linux]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.versao.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
 
-          Write-Host "Publicado em https://github.com/$env:GITHUB_REPOSITORY/releases/latest"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: pacotes
+          merge-multiple: true
+
+      # As notas saem dos commits desde a release anterior, e o sha256 permite
+      # conferir o download antes de executar.
+      - name: Montar as notas
+        run: |
+          set -euo pipefail
+          anterior=$(git tag --list 'v*' --sort=-v:refname | head -n 1)
+          if [ -n "$anterior" ]; then
+            faixa="desde a $anterior"
+            mudancas=$(git log --no-merges --pretty='- %s' "$anterior..HEAD")
+          else
+            faixa="primeira release versionada"
+            mudancas=$(git log --no-merges --pretty='- %s' -n 20)
+          fi
+          [ -n "$mudancas" ] || mudancas="- nenhuma mudanca de codigo $faixa"
+          {
+            echo "## O que mudou ($faixa)"
+            echo
+            echo "$mudancas"
+            echo
+            echo "## Instalar"
+            echo
+            echo "**Windows:** baixe o \`StreamDeck-Setup-$VERSION.exe\` e execute."
+            echo "Nao precisa de Python nem de permissao de administrador. Os favoritos"
+            echo "ficam em \`%LOCALAPPDATA%\StreamDeck\apps.json\` e sobrevivem a atualizacao."
+            echo
+            echo "**Linux (KDE Plasma 6):** baixe o \`StreamDeck-$VERSION-linux.tar.gz\`."
+            echo
+            echo '```bash'
+            echo "tar --extract --gzip --file StreamDeck-$VERSION-linux.tar.gz"
+            echo "cd StreamDeck-$VERSION && ./install.sh"
+            echo '```'
+            echo
+            echo "Sobe como servico de usuario do systemd. Para remover: \`./install.sh --uninstall\`."
+            echo
+            echo "## SHA256"
+            echo
+            echo '```'
+            (cd pacotes && sha256sum -- *)
+            echo '```'
+          } > notas.md
+          cat notas.md
+
+      - name: Publicar a release
+        run: |
+          set -euo pipefail
+          gh release create "v$VERSION" pacotes/* \
+            --target "$GITHUB_SHA" \
+            --title "StreamDeck $VERSION" \
+            --notes-file notas.md
+          echo "Publicado em https://github.com/$GITHUB_REPOSITORY/releases/tag/v$VERSION"

@@ -1,0 +1,2 @@
+# Script de instalacao do Linux: com CRLF o shebang nao executa.
+*.sh text eol=lf

@@ -4,6 +4,12 @@ name: Release
 # pacote do Linux. A versao incrementa o patch da ultima release publicada, de
 # modo que o historico fica na lista de releases:
 # https://github.com/omarcosvitor/StreamDeack/releases
+#
+# Os jobs sobem os arquivos direto numa release em rascunho em vez de passar por
+# artefatos entre jobs: a cota de artefatos do Actions nao aguenta um instalador
+# de ~12 MB por push e, quando estoura, o workflow inteiro cai. Entre os jobs so
+# viaja o sha256, que e texto. Se um dos builds falhar, a release fica em
+# rascunho e ninguem baixa um par de arquivos pela metade.
 on:
   push:
     branches: [main]
@@ -25,6 +31,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.calc.outputs.version }}
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -54,11 +62,29 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "Versao desta release: $version"
 
+      - name: Abrir a release em rascunho
+        env:
+          VERSION: ${{ steps.calc.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Um rascunho nao cria a tag, entao uma tentativa anterior que falhou
+          # deixa a mesma versao pendente: reaproveita o rascunho em vez de parar.
+          # Se a release ja estiver publicada, o create falha de proposito.
+          if [ "$(gh release view "v$VERSION" --json isDraft --jq .isDraft 2>/dev/null || true)" = "true" ]; then
+            echo "Reaproveitando o rascunho de v$VERSION"
+          else
+            gh release create "v$VERSION" --draft --target "$GITHUB_SHA" \
+              --title "StreamDeck $VERSION" --notes "Build em andamento."
+          fi
+
   windows:
     needs: versao
     runs-on: windows-latest
+    outputs:
+      sha: ${{ steps.pacote.outputs.sha }}
     env:
       VERSION: ${{ needs.versao.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
 
     steps:
       - uses: actions/checkout@v4
@@ -91,23 +117,27 @@ jobs:
           Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
           .\build.ps1 -Version $env:VERSION
 
-      - name: Conferir o resultado
+      - name: Conferir e enviar o instalador
+        id: pacote
         run: |
           $exe = Get-Item "release\StreamDeck-Setup-$env:VERSION.exe" -ErrorAction Stop
           Write-Host ("{0} - {1:N1} MB" -f $exe.Name, ($exe.Length / 1MB))
           if ($exe.Length -lt 1MB) { throw 'Instalador menor que o esperado.' }
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: windows
-          path: release/StreamDeck-Setup-${{ needs.versao.outputs.version }}.exe
-          retention-days: 1
+          $sha = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower()
+          "sha=$sha" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+          gh release upload "v$env:VERSION" $exe.FullName --clobber
+          if ($LASTEXITCODE -ne 0) { throw "Nao foi possivel enviar o instalador ($LASTEXITCODE)." }
 
   linux:
     needs: versao
     runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.pacote.outputs.sha }}
     env:
       VERSION: ${{ needs.versao.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
 
     steps:
       - uses: actions/checkout@v4
@@ -124,24 +154,26 @@ jobs:
           chmod +x "$pasta/install.sh"
           tar --create --gzip --file "StreamDeck-$VERSION-linux.tar.gz" "$pasta"
 
-      - name: Conferir o pacote
+      - name: Conferir e enviar o pacote
+        id: pacote
         run: |
           set -euo pipefail
           python3 -m compileall -q deck.py decklinux.py
           sh -n install.sh
           tar --list --file "StreamDeck-$VERSION-linux.tar.gz"
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: linux
-          path: StreamDeck-${{ needs.versao.outputs.version }}-linux.tar.gz
-          retention-days: 1
+          sha=$(sha256sum "StreamDeck-$VERSION-linux.tar.gz" | cut -d' ' -f1)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+          gh release upload "v$VERSION" "StreamDeck-$VERSION-linux.tar.gz" --clobber
 
   publicar:
     needs: [versao, windows, linux]
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.versao.outputs.version }}
+      SHA_WINDOWS: ${{ needs.windows.outputs.sha }}
+      SHA_LINUX: ${{ needs.linux.outputs.sha }}
       GH_TOKEN: ${{ github.token }}
 
     steps:
@@ -149,17 +181,13 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: actions/download-artifact@v4
-        with:
-          path: pacotes
-          merge-multiple: true
-
       # As notas saem dos commits desde a release anterior, e o sha256 permite
-      # conferir o download antes de executar.
+      # conferir o download antes de executar. A tag desta release ja existe (o
+      # rascunho criou), entao ela sai da lista antes de escolher a anterior.
       - name: Montar as notas
         run: |
           set -euo pipefail
-          anterior=$(git tag --list 'v*' --sort=-v:refname | head -n 1)
+          anterior=$(git tag --list 'v*' --sort=-v:refname | grep -Fxv "v$VERSION" | head -n 1 || true)
           if [ -n "$anterior" ]; then
             faixa="desde a $anterior"
             mudancas=$(git log --no-merges --pretty='- %s' "$anterior..HEAD")
@@ -191,7 +219,8 @@ jobs:
             echo "## SHA256"
             echo
             echo '```'
-            (cd pacotes && sha256sum -- *)
+            echo "$SHA_WINDOWS  StreamDeck-Setup-$VERSION.exe"
+            echo "$SHA_LINUX  StreamDeck-$VERSION-linux.tar.gz"
             echo '```'
           } > notas.md
           cat notas.md
@@ -199,8 +228,5 @@ jobs:
       - name: Publicar a release
         run: |
           set -euo pipefail
-          gh release create "v$VERSION" pacotes/* \
-            --target "$GITHUB_SHA" \
-            --title "StreamDeck $VERSION" \
-            --notes-file notas.md
+          gh release edit "v$VERSION" --notes-file notas.md --draft=false --latest
           echo "Publicado em https://github.com/$GITHUB_REPOSITORY/releases/tag/v$VERSION"

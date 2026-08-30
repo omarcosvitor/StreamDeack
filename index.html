@@ -83,10 +83,16 @@
   #sheet h2 { margin:0 0 12px; font-size:15px; letter-spacing:.02em; }
   #sheet label { display:block; margin-bottom:10px; font-size:11px;
                  text-transform:uppercase; letter-spacing:.08em; color:#68788a; }
-  #sheet input { display:block; width:100%; margin-top:5px; padding:9px 11px;
-                 border:1px solid #d3dbe3; border-radius:11px; background:#f7f9fb;
-                 color:#17212c; font:14px inherit; user-select:text; -webkit-user-select:text; }
-  #sheet input:focus { outline:2px solid #e8933a; outline-offset:0; border-color:#e8933a; }
+  #sheet input, #sheet select { display:block; width:100%; margin-top:5px;
+                 padding:9px 11px; border:1px solid #d3dbe3; border-radius:11px;
+                 background:#f7f9fb; color:#17212c; font:14px inherit;
+                 user-select:text; -webkit-user-select:text; }
+  #sheet input:focus, #sheet select:focus { outline:2px solid #e8933a;
+                 outline-offset:0; border-color:#e8933a; }
+  #hk-combo { margin:2px 0 12px; padding:9px 11px; border-radius:11px;
+              background:#fbeedd; color:#8a4d12; font:600 13px inherit;
+              text-align:center; }
+  #hk-combo.empty { background:#f2f5f8; color:#7d8b99; font-weight:400; }
   #mods { display:flex; flex-wrap:wrap; gap:7px; margin:5px 0 12px; }
   #sheet button { padding:9px 14px; border:1px solid #d3dbe3; border-radius:11px;
                   background:#f7f9fb; color:#33485c; font:600 13px inherit; }
@@ -124,10 +130,11 @@
       <button type="button" data-mod="win">Win</button>
     </div>
     <label>Tecla
-      <input id="hk-key" list="hk-keys" autocomplete="off" autocapitalize="off"
-             autocorrect="off" spellcheck="false" placeholder="m, f5, enter, mute" required>
+      <select id="hk-key" required>
+        <option value="">toque para escolher na lista</option>
+      </select>
     </label>
-    <datalist id="hk-keys"></datalist>
+    <p id="hk-combo" class="empty"></p>
     <label>Nome (opcional)
       <input id="hk-name" autocomplete="off" placeholder="Mutar microfone">
     </label>
@@ -505,14 +512,43 @@ function load() {
 
 // Novo atalho ---------------------------------------------------------------
 // O celular nao tem Ctrl nem Shift pra capturar de verdade, entao o combo se
-// monta no dedo: chips pros modificadores e o nome da tecla final digitado.
-var KEY_LIST = ('a b c d e f g h i j k l m n o p q r s t u v w x y z ' +
-                '0 1 2 3 4 5 6 7 8 9 f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12 ' +
-                'enter esc tab space backspace delete insert home end pageup pagedown ' +
-                'up down left right printscreen menu capslock ' +
-                'volumeup volumedown mute playpause next prev stop ' +
-                'comma period slash backslash semicolon apostrophe grave ' +
-                'bracketleft bracketright minus equal').split(' ');
+// monta no dedo: chips pros modificadores e a tecla final escolhida na lista.
+// A lista e fechada (o PC so aceita esses nomes) e vem com o nome por extenso -
+// ninguem adivinha que a tecla ~ se chama "grave".
+function keyPairs(spec) {
+  return spec.split('|').map(function (p) {
+    var i = p.indexOf(':');
+    return [p.slice(0, i), p.slice(i + 1)];
+  });
+}
+
+var KEY_GROUPS = (function () {
+  var letters = [], digits = [], fkeys = [], i;
+  for (i = 0; i < 26; i++)
+    letters.push([String.fromCharCode(97 + i), String.fromCharCode(65 + i)]);
+  for (i = 0; i <= 9; i++) digits.push([String(i), String(i)]);
+  for (i = 1; i <= 12; i++) fkeys.push(['f' + i, 'F' + i]);
+  return [
+    ['Letras', letters],
+    ['Numeros', digits],
+    ['Teclas de funcao', fkeys],
+    ['Navegacao e edicao', keyPairs(
+      'enter:Enter|esc:Esc|tab:Tab|space:Espaco|backspace:Backspace|' +
+      'delete:Delete|insert:Insert|home:Home|end:End|pageup:Page Up|' +
+      'pagedown:Page Down|up:Seta para cima|down:Seta para baixo|' +
+      'left:Seta para esquerda|right:Seta para direita')],
+    ['Midia e volume', keyPairs(
+      'volumeup:Aumentar volume|volumedown:Abaixar volume|mute:Mudo|' +
+      'playpause:Play / Pause|next:Proxima faixa|prev:Faixa anterior|stop:Parar')],
+    ['Pontuacao e simbolos', keyPairs(
+      'comma:Virgula ,|period:Ponto .|slash:Barra /|backslash:Barra invertida|' +
+      'semicolon:Ponto e virgula ;|apostrophe:Aspas simples|grave:Crase|' +
+      'bracketleft:Abre colchete [|bracketright:Fecha colchete ]|' +
+      'minus:Hifen -|equal:Igual =')],
+    ['Outras', keyPairs(
+      'printscreen:Print Screen|menu:Menu de contexto|capslock:Caps Lock')]
+  ];
+})();
 var sheet = document.getElementById('sheet');
 var form = document.getElementById('hk');
 var keyIn = document.getElementById('hk-key');
@@ -521,27 +557,48 @@ var modsEl = document.getElementById('mods');
 var saveBtn = form.querySelector('.go');
 var scr = document.getElementById('scr');
 var scrList = document.getElementById('scr-list');
+var comboEl = document.getElementById('hk-combo');
 
 (function () {
-  var list = document.getElementById('hk-keys');
   var frag = document.createDocumentFragment();
-  for (var i = 0; i < KEY_LIST.length; i++) {
-    var o = document.createElement('option');
-    o.value = KEY_LIST[i];
-    frag.appendChild(o);
-  }
-  list.appendChild(frag);
+  KEY_GROUPS.forEach(function (group) {
+    var g = document.createElement('optgroup');
+    g.label = group[0];
+    group[1].forEach(function (pair) {
+      var o = document.createElement('option');
+      o.value = pair[0];
+      o.textContent = pair[1];
+      g.appendChild(o);
+    });
+    frag.appendChild(g);
+  });
+  keyIn.appendChild(frag);
 })();
 
+function chipsOn() {
+  var on = [], chips = modsEl.children;
+  for (var i = 0; i < chips.length; i++) if (chips[i].className) on.push(chips[i]);
+  return on;
+}
+
+// O combo montado ate agora, do jeito que vai chegar no PC.
+function showCombo() {
+  var parts = chipsOn().map(function (c) { return c.textContent; });
+  if (keyIn.value) parts.push(keyIn.options[keyIn.selectedIndex].textContent);
+  comboEl.className = parts.length ? '' : 'empty';
+  comboEl.textContent = parts.length ? parts.join(' + ')
+    : 'escolha os modificadores e a tecla';
+}
+
 function openSheet() {
-  keyIn.value = '';
+  keyIn.selectedIndex = 0;
   nameIn.value = '';
   var chips = modsEl.children;
   for (var i = 0; i < chips.length; i++) chips[i].className = '';
+  showCombo();
   form.hidden = false;
   scr.hidden = true;
   sheet.hidden = false;
-  keyIn.focus();
 }
 
 function closeSheet() { sheet.hidden = true; }
@@ -583,8 +640,11 @@ modsEl.addEventListener('click', function (e) {
   var chip = e.target.closest ? e.target.closest('button') : null;
   if (!chip) return;
   chip.className = chip.className ? '' : 'on';
+  showCombo();
   vibe(10);
 });
+
+keyIn.addEventListener('change', showCombo);
 
 document.getElementById('hk-no').addEventListener('click', closeSheet);
 document.getElementById('scr-no').addEventListener('click', closeSheet);
@@ -595,12 +655,9 @@ document.addEventListener('keydown', function (e) {
 
 form.addEventListener('submit', function (e) {
   e.preventDefault();
-  var key = keyIn.value.trim();
+  var key = keyIn.value;
   if (!key) return toast('escolha a tecla');
-  var parts = [];
-  var chips = modsEl.children;
-  for (var i = 0; i < chips.length; i++)
-    if (chips[i].className) parts.push(chips[i].dataset.mod);
+  var parts = chipsOn().map(function (c) { return c.dataset.mod; });
   parts.push(key);
   post('/api/fav', { hotkey: parts.join('+'), name: nameIn.value }, saveBtn)
     .then(function (ok) {

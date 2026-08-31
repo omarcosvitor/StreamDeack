@@ -106,6 +106,11 @@
                      text-align:left; padding:11px 13px; }
   #scr-list button.on { border-color:#e8933a; background:#fbeedd; color:#8a4d12; }
   #scr-list small { font-weight:400; font-size:11px; opacity:.7; }
+  #upd-msg { margin:0 0 14px; padding:11px 13px; border-radius:11px;
+             background:#f2f5f8; color:#33485c; font-size:12px; line-height:1.45; }
+  #upd-msg.bad { background:#fbeedd; color:#8a4d12; }
+  /* Tecla de atualizacao: a setinha girando, igual a dos programas de PC. */
+  .key .ph.upd { background:#eef2f7; color:#33485c; }
   /* Tecla de tela: um monitorzinho com o numero da tela que o deck comanda. */
   .key .ph.scr { background:none; border:2px solid #7a8b9c; border-radius:4px;
                  color:#33485c; }
@@ -143,6 +148,15 @@
       <button type="submit" class="go">Salvar</button>
     </div>
   </form>
+  <div id="upd" class="panel" hidden>
+    <h2>Atualizacao</h2>
+    <p class="hint" id="upd-ver"></p>
+    <p id="upd-msg" class="note"></p>
+    <div class="acts">
+      <button type="button" id="upd-no">Fechar</button>
+      <button type="button" id="upd-go" class="go" hidden>Instalar</button>
+    </div>
+  </div>
   <div id="scr" class="panel" hidden>
     <h2>Tela que o deck comanda</h2>
     <p class="hint">Os aplicativos abrem e sao maximizados na tela escolhida.</p>
@@ -319,6 +333,7 @@ stage.addEventListener('click', function (e) {
 function tap(k) {
   if (k.kind === 'new') return openSheet();
   if (k.kind === 'screen') return openScreens();
+  if (k.kind === 'update') return openUpdate();
   if (k.kind === 'open') return post('/api/run', { pid: k.idx }, k);
   if (k.kind === 'recent') return post('/api/run', { recent: k.idx }, k);
   post('/api/run', { fav: k.idx }, k);
@@ -327,6 +342,7 @@ function tap(k) {
 function hold(k) {
   if (k.kind === 'new') return openSheet();
   if (k.kind === 'screen') return openScreens();
+  if (k.kind === 'update') return openUpdate();
   if (k.kind === 'fav') return post('/api/fav', { remove: k.idx }, k).then(load);
   if (k.kind === 'recent') return post('/api/fav', { add_recent: k.idx }, k).then(load);
   if (k.isFav) return toast(k.label + ' ja esta nos favoritos');
@@ -398,6 +414,13 @@ function buildKey(item, size, kind, idx) {
     art.style.cssText = 'width:' + as + 'px;height:' + as + 'px';
     art.onload = function () { paint(b, glow, art); };
     art.src = item.icon;
+  } else if (item.update) {
+    art = document.createElement('div');
+    art.className = 'ph upd';
+    art.textContent = '\u21BB';
+    art.style.cssText = 'width:' + as + 'px;height:' + as + 'px;font-size:' +
+                        Math.round(as * 0.66) + 'px';
+    paint(b, glow, null);
   } else if (item.screen) {
     art = display(as);
     paint(b, glow, null, null);
@@ -443,6 +466,7 @@ function favKeys(cap) {
   var tail = [{ item: { name: 'novo atalho', plus: true }, kind: 'new', idx: -1 }];
   if (data.screens.length > 1)
     tail.push({ item: { name: 'tela ' + screenNumber(), screen: true }, kind: 'screen', idx: -1 });
+  tail.push({ item: { name: 'atualizar', update: true }, kind: 'update', idx: -1 });
   all = all.concat(tail);
   return all.length <= cap ? all : all.slice(0, cap - tail.length).concat(tail);
 }
@@ -557,6 +581,10 @@ var modsEl = document.getElementById('mods');
 var saveBtn = form.querySelector('.go');
 var scr = document.getElementById('scr');
 var scrList = document.getElementById('scr-list');
+var upd = document.getElementById('upd');
+var updVer = document.getElementById('upd-ver');
+var updMsg = document.getElementById('upd-msg');
+var updGo = document.getElementById('upd-go');
 var comboEl = document.getElementById('hk-combo');
 
 (function () {
@@ -590,18 +618,27 @@ function showCombo() {
     : 'escolha os modificadores e a tecla';
 }
 
+// O sheet guarda os tres paineis (novo atalho, tela, atualizacao) e mostra um.
+function showPanel(panel) {
+  form.hidden = panel !== form;
+  scr.hidden = panel !== scr;
+  upd.hidden = panel !== upd;
+  sheet.hidden = false;
+}
+
 function openSheet() {
   keyIn.selectedIndex = 0;
   nameIn.value = '';
   var chips = modsEl.children;
   for (var i = 0; i < chips.length; i++) chips[i].className = '';
   showCombo();
-  form.hidden = false;
-  scr.hidden = true;
-  sheet.hidden = false;
+  showPanel(form);
 }
 
-function closeSheet() { sheet.hidden = true; }
+function closeSheet() {
+  clearTimeout(updTimer);
+  sheet.hidden = true;
+}
 
 // Escolher a tela: uma linha por monitor mais a opcao de nao mandar em nenhuma.
 function openScreens() {
@@ -631,10 +668,69 @@ function openScreens() {
   });
   scrList.textContent = '';
   scrList.appendChild(frag);
-  form.hidden = true;
-  scr.hidden = false;
-  sheet.hidden = false;
+  showPanel(scr);
 }
+
+// Atualizacao ---------------------------------------------------------------
+// Abre ja procurando versao nova e mostra o passo a passo que o PC reporta
+// (procurando, baixando com %, instalando). O botao so aparece quando ha o que
+// instalar: dai o PC baixa, instala e se reinicia sozinho - no Windows pelo
+// instalador, no Linux pelo servico do systemd.
+var updTimer = 0, updTries = 0, updGoing = false;
+
+function openUpdate() {
+  updGoing = false;
+  updTries = 0;
+  updGo.hidden = true;
+  updVer.textContent = '';
+  updMsg.className = '';
+  updMsg.textContent = 'procurando atualizacao...';
+  showPanel(upd);
+  post('/api/update', {}, updGo).then(pollUpdate);
+}
+
+function paintUpdate(s) {
+  updVer.textContent = 'Versao instalada: ' +
+    (s.current || 'desconhecida - este deck roda do codigo-fonte');
+  updMsg.textContent = s.message;
+  updMsg.className = s.state === 'error' ? 'bad' : '';
+  updGo.hidden = s.state !== 'ready';
+  updGo.textContent = s.latest ? 'Instalar ' + s.latest : 'Instalar';
+}
+
+function pollUpdate() {
+  clearTimeout(updTimer);
+  if (sheet.hidden || upd.hidden) return;
+  fetch('/api/update').then(function (r) { return r.json(); }).then(function (s) {
+    if (sheet.hidden || upd.hidden) return;
+    updTries = 0;
+    // O Linux reinicia o servico no fim: o deck volta zerado, mas quem pediu a
+    // instalacao sabe que isso e o fim feliz, nao um estado ocioso qualquer.
+    if (updGoing && s.state === 'idle') {
+      updGoing = false;
+      s = { state: 'done', current: s.current, latest: '',
+            message: 'Pronto - o StreamDeck reiniciou na versao nova.' };
+    }
+    paintUpdate(s);
+    if (s.state === 'checking' || s.state === 'downloading' || s.state === 'installing')
+      updTimer = setTimeout(pollUpdate, 1000);
+  }, function () {
+    // Sem resposta enquanto o PC troca de versao - espera ele voltar.
+    if (++updTries > 15) return paintUpdate(
+      { state: 'error', current: '', latest: '', message: 'sem conexao com o PC' });
+    updTimer = setTimeout(pollUpdate, 2000);
+  });
+}
+
+updGo.addEventListener('click', function () {
+  updGoing = true;
+  updGo.hidden = true;
+  updMsg.className = '';
+  updMsg.textContent = 'baixando a versao nova...';
+  post('/api/update', { install: true }, updGo).then(pollUpdate);
+});
+
+document.getElementById('upd-no').addEventListener('click', closeSheet);
 
 modsEl.addEventListener('click', function (e) {
   var chip = e.target.closest ? e.target.closest('button') : null;

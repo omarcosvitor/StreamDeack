@@ -150,15 +150,18 @@ jobs:
           set -euo pipefail
           pasta="StreamDeck-$VERSION"
           mkdir -p "$pasta"
-          cp deck.py decklinux.py index.html install.sh README.md "$pasta/"
+          cp deck.py decklinux.py deckupdate.py index.html install.sh README.md "$pasta/"
           chmod +x "$pasta/install.sh"
+          # O deck instalado compara este numero com a ultima release pra saber
+          # se ha atualizacao. So existe no pacote publicado.
+          printf '%s' "$VERSION" > "$pasta/version.txt"
           tar --create --gzip --file "StreamDeck-$VERSION-linux.tar.gz" "$pasta"
 
       - name: Conferir e enviar o pacote
         id: pacote
         run: |
           set -euo pipefail
-          python3 -m compileall -q deck.py decklinux.py
+          python3 -m compileall -q deck.py decklinux.py deckupdate.py
           sh -n install.sh
           tar --list --file "StreamDeck-$VERSION-linux.tar.gz"
 

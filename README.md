@@ -47,18 +47,19 @@ fala com a internet por conta própria.
 - **No terminal**: `python deck.py update` (ou `--check`, que só avisa se há
   versão nova, e `--force`, que reinstala a atual).
 
-Enquanto o repositório for **privado**, o download do pacote precisa de um
-token do GitHub com leitura no repo (fine-grained com `Contents: read` basta).
-Ele vai no `settings.json`, ao lado do `apps.json`:
+O repositório é público: o pacote vem pela URL aberta da release, sem nenhuma
+credencial. O download é sempre `https` (o deck recusa qualquer redirecionamento
+que saia dele), o certificado é conferido e o conteúdo só é instalado se bater
+com o `sha256` publicado nas notas da release. Se um dia o repositório fechar,
+ou se os 60 pedidos por hora da API anônima apertarem, dá para pôr um token de
+leitura no `settings.json` (`{"github_token": "..."}`) ou na variável
+`STREAMDECK_TOKEN` — nesse caso ele vai só para a API do GitHub, nunca para o
+servidor de arquivos.
 
-```json
-{ "github_token": "github_pat_..." }
-```
-
-Também vale pelo ambiente (`STREAMDECK_TOKEN` ou `GITHUB_TOKEN`) — no serviço do
-systemd, `systemctl --user edit streamdeck` e um `Environment=STREAMDECK_TOKEN=...`.
-Sem token o deck avisa em vez de falhar em silêncio. Se o repositório virar
-público, nada disso é preciso: o pacote vem pela URL aberta da release.
+Como todo o resto da API do deck, `atualizar` não pede senha: quem alcança a
+porta na rede local pode disparar a instalação (e também abrir aplicativos e
+mandar teclas). Vale o mesmo cuidado de sempre — liberar a porta só na rede de
+casa, nunca no roteador para a internet.
 
 No Linux a instalação é o mesmo `install.sh` do pacote, rodado numa unidade
 própria do systemd — assim ele sobrevive ao reinício do serviço que ele mesmo

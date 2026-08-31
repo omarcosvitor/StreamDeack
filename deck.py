@@ -354,13 +354,13 @@ def update_status(req=None):
 
 
 def github_token():
-    """Token de leitura do repositorio, so preciso enquanto ele for privado.
+    """Token de leitura do repositorio - opcional, o repo e publico.
 
-    Vem do settings.json ("github_token") ou do ambiente - assim ninguem
-    precisa recompilar nada pra trocar de token.
+    Serve pra quem fechar o repo ou esbarrar no limite da API anonima. Le so o
+    que foi dado a este programa (settings.json ou STREAMDECK_TOKEN): um
+    GITHUB_TOKEN do ambiente e credencial de outra coisa e nao vai junto.
     """
-    return (settings().get("github_token") or os.environ.get("STREAMDECK_TOKEN")
-            or os.environ.get("GITHUB_TOKEN") or "")
+    return settings().get("github_token") or os.environ.get("STREAMDECK_TOKEN") or ""
 
 
 def quit_deck():

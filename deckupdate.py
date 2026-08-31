@@ -4,10 +4,11 @@ O programa instalado sabe a propria versao pelo ``version.txt`` que o build
 grava ao lado dele. O clone de desenvolvimento nao tem esse arquivo: ali o
 updater so conta qual e a ultima versao publicada e nao mexe em nada.
 
-O repositorio e privado: o download do pacote pede um token do GitHub (com
-acesso de leitura ao repo) em ``settings.json`` -> ``"github_token"``, ou nas
-variaveis STREAMDECK_TOKEN / GITHUB_TOKEN. Num repositorio publico nada disso e
-preciso e o pacote vem pela URL aberta da release.
+O repositorio e publico, entao o pacote vem pela URL aberta da release e nenhuma
+credencial e usada. Se um dia ele fechar (ou se os 60 pedidos por hora da API
+anonima apertarem), da pra por um token de leitura em ``settings.json`` ->
+``"github_token"``, ou na variavel STREAMDECK_TOKEN: ai o download passa a usar
+a URL da API, que e a unica que aceita autenticacao.
 
 Nada disso roda sozinho - so quando a bandeja, o celular ou o
 ``python deck.py update`` pedem. O deck nunca fala com a internet por conta
@@ -45,6 +46,9 @@ class _DropAuthOnRedirect(urllib.request.HTTPRedirectHandler):
     """
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # Redirecionamento pra http seria baixar o pacote em claro: nem tenta.
+        if not newurl.lower().startswith("https://"):
+            raise urllib.error.URLError("o GitHub redirecionou pra fora do https")
         novo = super().redirect_request(req, fp, code, msg, headers, newurl)
         if novo is not None:
             novo.headers.pop("Authorization", None)
@@ -55,6 +59,9 @@ _opener = urllib.request.build_opener(_DropAuthOnRedirect)
 
 
 def _get(url, headers, timeout):
+    """GET com certificado conferido (o padrao do Python) e sem cair pra http."""
+    if not url.lower().startswith("https://"):
+        raise RuntimeError("endereco fora do https: %s" % url)
     return _opener.open(urllib.request.Request(url, headers=headers), timeout=timeout)
 
 
@@ -191,13 +198,26 @@ def _install_windows(package, version):
     return "Instalando a versao %s - o StreamDeck fecha e volta sozinho." % version
 
 
+def _extract(tar, folder):
+    """Extrai recusando o que escapa da pasta ou nao e arquivo/diretorio comum."""
+    filtro = getattr(tarfile, "data_filter", None)
+    if filtro is not None:
+        return tar.extractall(folder, filter=filtro)
+    # Python velho, sem o filtro pronto: confere na mao antes de escrever nada.
+    base = os.path.realpath(folder)
+    for membro in tar.getmembers():
+        destino = os.path.realpath(os.path.join(folder, membro.name))
+        if destino != base and not destino.startswith(base + os.sep):
+            raise RuntimeError("o pacote tenta escrever fora da pasta: %s" % membro.name)
+        if not (membro.isfile() or membro.isdir()):
+            raise RuntimeError("o pacote traz um membro estranho: %s" % membro.name)
+    tar.extractall(folder)
+
+
 def _install_linux(package, version, dest_dir):
     folder = os.path.dirname(package)
     with tarfile.open(package) as tar:
-        try:
-            tar.extractall(folder, filter="data")
-        except TypeError:  # Python sem o filtro de extracao (< 3.12)
-            tar.extractall(folder)
+        _extract(tar, folder)
     root = os.path.join(folder, "StreamDeck-%s" % version)
     script = os.path.join(root, "install.sh")
     if not os.path.exists(script):

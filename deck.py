@@ -3,6 +3,7 @@
 Uso:
     python deck.py           inicia na bandeja do sistema
     python deck.py serve     inicia no terminal e imprime a URL
+    python deck.py update    procura a versao nova no GitHub e instala
     python deck.py check     autoteste
 
 No celular: abre a URL no Chrome, menu -> Compartilhar -> "Adicionar a tela
@@ -40,6 +41,8 @@ if sys.platform == "win32":
 else:
     import decklinux as backend
 
+import deckupdate
+
 # O PyInstaller extrai os arquivos empacotados em ``sys._MEIPASS``. A
 # configuracao, por outro lado, precisa ficar fora da pasta do programa para
 # continuar gravavel depois da instalacao e sobreviver a atualizacoes.
@@ -51,6 +54,9 @@ elif sys.platform == "win32":
 else:
     DATA_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME",
                                            os.path.expanduser("~/.config")), "StreamDeck")
+# Vazia quando o deck roda do codigo-fonte: so o pacote publicado traz o
+# version.txt, e sem saber a versao instalada nao da pra comparar com a do GitHub.
+VERSION = deckupdate.installed_version()
 FAVS = os.path.join(DATA_DIR, "apps.json")
 SETTINGS = os.path.join(DATA_DIR, "settings.json")
 PORT = int(os.environ.get("DECK_PORT", 8765))
@@ -326,6 +332,114 @@ def edit_favorites(req):
     save_favorites(favs)
 
 
+# Atualizacao ----------------------------------------------------------------
+# A bandeja do Windows, o celular e a linha de comando disparam a mesma rotina e
+# leem o mesmo progresso (GET /api/update), entao o estado mora aqui. So roda
+# quando alguem pede: o deck nunca procura atualizacao sozinho.
+_update_lock = threading.Lock()
+_update = {"state": "idle", "message": "", "latest": ""}
+_quit_hook = None
+_serving = False
+
+
+def update_state(**changes):
+    with _update_lock:
+        _update.update(changes)
+
+
+def update_status(req=None):
+    """GET /api/update: o passo em que a atualizacao esta, pro celular desenhar."""
+    with _update_lock:
+        return dict(_update, current=VERSION)
+
+
+def github_token():
+    """Token de leitura do repositorio - opcional, o repo e publico.
+
+    Serve pra quem fechar o repo ou esbarrar no limite da API anonima. Le so o
+    que foi dado a este programa (settings.json ou STREAMDECK_TOKEN): um
+    GITHUB_TOKEN do ambiente e credencial de outra coisa e nao vai junto.
+    """
+    return settings().get("github_token") or os.environ.get("STREAMDECK_TOKEN") or ""
+
+
+def quit_deck():
+    """Fecha o deck: a bandeja sabe sair direito, o resto encerra o processo."""
+    if _quit_hook:
+        try:
+            return _quit_hook()
+        except Exception:
+            pass
+    os._exit(0)
+
+
+def run_update(install=True, notify=None, force=False):
+    """Procura a versao nova e, se houver, baixa e instala. Sincrona.
+
+    ``install=False`` so procura - e o que a tela do celular faz ao abrir, pra
+    perguntar antes de baixar. Quem chama escolhe se roda em thread.
+    """
+    def step(state, message):
+        update_state(state=state, message=message)
+        if notify:
+            notify(message)
+        return message
+
+    try:
+        token = github_token()
+        release = deckupdate.latest_release(token)
+        latest = release["version"]
+        update_state(latest=latest)
+        if not VERSION:
+            return step("error", "Ultima versao publicada: %s. Este deck roda do "
+                                 "codigo-fonte - atualize pelo git." % latest)
+        if not force and not deckupdate.is_newer(latest, VERSION):
+            return step("current", "Voce ja esta na versao mais nova (%s)." % VERSION)
+        if not install:
+            return step("ready", "Versao %s disponivel - voce tem a %s." % (latest, VERSION))
+
+        # Progresso so quando o percentual muda: sao milhares de blocos por download.
+        seen = [-1]
+
+        def progress(done, total):
+            pct = done * 100 // total if total else -1
+            if pct == seen[0]:
+                return
+            seen[0] = pct
+            update_state(state="downloading", message="Baixando a versao %s%s"
+                         % (latest, " - %d%%" % pct if pct >= 0 else "..."))
+
+        update_state(state="downloading", message="Baixando a versao %s..." % latest)
+        package = deckupdate.download(release, progress, token)
+        step("installing", "Instalando a versao %s..." % latest)
+        done = deckupdate.install(package, latest, BUNDLE_DIR)
+        step("done", done)
+        if sys.platform == "win32" and _serving:
+            # O instalador precisa trocar os arquivos que este processo esta usando.
+            threading.Timer(1.5, quit_deck).start()
+        return done
+    except Exception as error:
+        return step("error", str(error).splitlines()[0][:200] or "a atualizacao falhou")
+
+
+def begin_update(install=True, notify=None):
+    """Dispara a atualizacao numa thread, se ja nao houver uma rodando."""
+    with _update_lock:
+        if _update["state"] in ("checking", "downloading", "installing"):
+            return False
+        _update.update(state="checking", message="Procurando atualizacao...", latest="")
+    if notify:
+        notify("Procurando atualizacao...")
+    threading.Thread(target=run_update, name="StreamDeck update", daemon=True,
+                     kwargs={"install": install, "notify": notify}).start()
+    return True
+
+
+def start_update(req):
+    """POST /api/update: sem corpo so procura, {"install": true} baixa e instala."""
+    begin_update(install=bool(req.get("install")))
+
+
 class Deck(http.server.BaseHTTPRequestHandler):
     # HTTP/1.1 mantem a conexao viva: o celular pede o HTML, o JSON e dezenas de
     # icones sem refazer o handshake TCP a cada um.
@@ -334,6 +448,9 @@ class Deck(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path
+        if path == "/api/update":
+            body = json.dumps(update_status(), separators=(",", ":")).encode()
+            return self._send(body, "application/json", NO_STORE)
         if path == "/api/apps":
             body = json.dumps(apps_payload(), separators=(",", ":")).encode()
             return self._send(body, "application/json", NO_STORE)
@@ -360,6 +477,8 @@ class Deck(http.server.BaseHTTPRequestHandler):
             action = edit_favorites
         elif self.path == "/api/screen":
             action = choose_screen
+        elif self.path == "/api/update":
+            action = start_update
         else:
             return self.send_error(404)
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
@@ -492,7 +611,12 @@ def deck_is_running():
         return False
 
 
+def app_title():
+    return "StreamDeck de bolso %s" % VERSION if VERSION else "StreamDeck de bolso"
+
+
 def run_tray():
+    global _quit_hook, _serving
     try:
         import pystray
     except ImportError:
@@ -512,6 +636,7 @@ def run_tray():
         return
 
     address = phone_url()
+    _serving = True
     server_thread = threading.Thread(
         target=server.serve_forever,
         name="StreamDeck HTTP",
@@ -533,19 +658,33 @@ def run_tray():
     def quit_app(icon, item):
         icon.stop()
 
+    # Buscar atualizacao: procura, baixa e instala, avisando cada passo pela
+    # notificacao da bandeja. O instalador fecha o deck e o reabre no fim.
+    def look_for_update(icon, item):
+        def say(message):
+            try:
+                icon.notify(message, app_title())
+            except Exception:
+                pass
+
+        if not begin_update(notify=say):
+            say(update_status()["message"] or "Ja tem uma atualizacao em andamento.")
+
     menu = pystray.Menu(
         pystray.MenuItem("Abrir neste computador", open_local, default=True),
         pystray.MenuItem("Copiar endereco do celular", copy_address),
         pystray.MenuItem(address, lambda icon, item: None, enabled=False),
         pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Buscar atualizacoes", look_for_update),
         pystray.MenuItem("Sair do StreamDeck", quit_app),
     )
     icon = pystray.Icon(
         "StreamDeckDeBolso",
         tray_image(),
-        "StreamDeck de bolso - %s" % address,
+        "%s - %s" % (app_title(), address),
         menu,
     )
+    _quit_hook = icon.stop
 
     def ready(tray_icon):
         tray_icon.visible = True
@@ -560,6 +699,7 @@ def run_tray():
     try:
         icon.run(setup=ready)
     finally:
+        _quit_hook = None
         if server_thread.is_alive():
             server.shutdown()
             server_thread.join(timeout=2)
@@ -567,8 +707,11 @@ def run_tray():
 
 
 def serve_console():
+    global _serving
     address = phone_url()
-    print("Deck em  %s   (libere a porta %d no firewall na 1a vez)" % (address, PORT))
+    print("%s em  %s   (libere a porta %d no firewall na 1a vez)"
+          % (app_title(), address, PORT))
+    _serving = True
     warm_up()
     DeckServer(("0.0.0.0", PORT), Deck).serve_forever()
 
@@ -608,6 +751,8 @@ def selfcheck():
     print("ok: telas %s, comandando %s"
           % (", ".join("%s (%dx%d)" % (s["name"], s["w"], s["h"]) for s in screens) or "(nenhuma)",
              target_screen() or "a que o sistema escolher"))
+    assert update_status()["current"] == VERSION
+    deckupdate.selfcheck()
     backend.selfcheck()
 
 
@@ -616,5 +761,9 @@ if __name__ == "__main__":
         selfcheck()
     elif "serve" in sys.argv:
         serve_console()
+    elif "update" in sys.argv:
+        # --check so conta se ha versao nova; --force reinstala a que ja esta la.
+        run_update(install="--check" not in sys.argv, notify=print,
+                   force="--force" in sys.argv)
     else:
         run_tray()

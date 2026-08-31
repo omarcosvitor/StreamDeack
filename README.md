@@ -32,6 +32,44 @@ favorito é o caminho de um arquivo `.desktop`, de uma pasta ou uma URL. O paine
 de baixo lista os aplicativos instalados (o Linux não tem o equivalente da lista
 de mais usados do Windows) — toque longo promove qualquer um a favorito.
 
+## Atualizar
+
+O deck se atualiza sozinho a partir das [releases](https://github.com/omarcosvitor/StreamDeack/releases)
+— sem baixar nada na mão. A busca só acontece quando você pede; o programa não
+fala com a internet por conta própria.
+
+- **No celular** (Windows e Linux): a tecla `ATUALIZAR`, no fim dos favoritos.
+  Ela mostra a versão instalada, procura a mais nova e, se houver, o botão
+  `Instalar` baixa, confere o sha256 e instala, com o progresso na tela.
+- **No Windows**: botão direito no ícone da bandeja → `Buscar atualizações`. O
+  instalador roda em silêncio, fecha o deck para trocar os arquivos e o reabre
+  no fim.
+- **No terminal**: `python deck.py update` (ou `--check`, que só avisa se há
+  versão nova, e `--force`, que reinstala a atual).
+
+O repositório é público: o pacote vem pela URL aberta da release, sem nenhuma
+credencial. O download é sempre `https` (o deck recusa qualquer redirecionamento
+que saia dele), o certificado é conferido e o conteúdo só é instalado se bater
+com o `sha256` publicado nas notas da release. Se um dia o repositório fechar,
+ou se os 60 pedidos por hora da API anônima apertarem, dá para pôr um token de
+leitura no `settings.json` (`{"github_token": "..."}`) ou na variável
+`STREAMDECK_TOKEN` — nesse caso ele vai só para a API do GitHub, nunca para o
+servidor de arquivos.
+
+Como todo o resto da API do deck, `atualizar` não pede senha: quem alcança a
+porta na rede local pode disparar a instalação (e também abrir aplicativos e
+mandar teclas). Vale o mesmo cuidado de sempre — liberar a porta só na rede de
+casa, nunca no roteador para a internet.
+
+No Linux a instalação é o mesmo `install.sh` do pacote, rodado numa unidade
+própria do systemd — assim ele sobrevive ao reinício do serviço que ele mesmo
+provoca. Os favoritos, o `settings.json` e a escolha de tela ficam onde estão.
+
+A versão instalada vem do `version.txt` que o build grava junto do programa.
+Rodando do código-fonte esse arquivo não existe: o deck avisa qual é a última
+release publicada e manda atualizar pelo git, em vez de instalar por cima do
+clone.
+
 ## Atalhos de teclado
 
 Um favorito pode ser um atalho em vez de um aplicativo: o toque manda as teclas
@@ -86,11 +124,14 @@ volta sozinho para o comportamento automático.
 ```
 python deck.py          bandeja (Windows; no Linux exige pystray, senão cai pro terminal)
 python deck.py serve    terminal
+python deck.py update   busca a versao nova e instala (--check so avisa)
 python deck.py check    autoteste
 ```
 
 `deck.py` é comum aos dois sistemas; `deckwin.py` e `decklinux.py` implementam
 listar/focar/lançar janelas, extrair ícones e a lista de recentes em cada um.
+`deckupdate.py` também é comum: lê a última release do GitHub, baixa o pacote do
+sistema, confere o sha256 e chama o instalador de cada um.
 
 ## Gerar os pacotes
 

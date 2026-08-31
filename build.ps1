@@ -27,6 +27,12 @@ try {
     }
 
     New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
+
+    # O programa le a propria versao daqui pra saber se a release do GitHub e
+    # mais nova. Fica so no pacote: o clone de desenvolvimento nao tem versao.
+    $VersionFile = Join-Path $ProjectDir 'version.txt'
+    Set-Content -LiteralPath $VersionFile -Value $Version -Encoding ascii -NoNewline
+
     $IconPath = Join-Path $BuildDir 'StreamDeck.ico'
     & $BuildPython (Join-Path $ProjectDir 'make_icon.py') $IconPath
     if ($LASTEXITCODE -ne 0) {
@@ -41,6 +47,7 @@ try {
         --windowed `
         --icon $IconPath `
         --add-data 'index.html;.' `
+        --add-data 'version.txt;.' `
         --exclude-module decklinux `
         --distpath $DistDir `
         --workpath $BuildDir `

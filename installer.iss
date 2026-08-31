@@ -41,3 +41,12 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDi
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Abrir o {#MyAppName}"; Flags: nowait postinstall skipifsilent
+; O proprio deck chama este instalador em silencio com /REOPEN=1 quando o
+; usuario manda atualizar: ele fechou pra ser substituido e volta sozinho aqui.
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait; Check: Reabrir
+
+[Code]
+function Reabrir: Boolean;
+begin
+  Result := ExpandConstant('{param:REOPEN|0}') = '1';
+end;

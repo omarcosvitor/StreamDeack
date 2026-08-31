@@ -27,10 +27,15 @@ python3 -c 'import gi' 2>/dev/null || {
 # apps.json e settings.json moram nesta pasta: copia so os arquivos do programa,
 # nunca limpa o destino, senao a atualizacao levaria os favoritos junto.
 mkdir -p "$DEST" "$(dirname "$UNIT")"
-for arquivo in deck.py decklinux.py index.html install.sh; do
+for arquivo in deck.py decklinux.py deckupdate.py index.html install.sh; do
     cp "$ORIGEM/$arquivo" "$DEST/$arquivo"
 done
 chmod +x "$DEST/install.sh"
+# So o pacote publicado traz o version.txt; sem ele o deck sabe que roda do
+# codigo-fonte e nao se atualiza sozinho.
+if [ -f "$ORIGEM/version.txt" ]; then
+    cp "$ORIGEM/version.txt" "$DEST/version.txt"
+fi
 
 cat > "$UNIT" <<UNIDADE
 [Unit]
@@ -46,8 +51,11 @@ Restart=on-failure
 WantedBy=default.target
 UNIDADE
 
+# enable + restart em vez de "enable --now": numa atualizacao o servico ja esta
+# de pe e precisa reiniciar pra carregar o codigo novo.
 systemctl --user daemon-reload
-systemctl --user enable --now streamdeck
+systemctl --user enable streamdeck
+systemctl --user restart streamdeck
 
 echo "Instalado em $DEST e rodando na porta $PORTA."
 systemctl --user --no-pager --lines=5 status streamdeck || true
